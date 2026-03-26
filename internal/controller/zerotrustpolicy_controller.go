@@ -48,11 +48,11 @@ type ZeroTrustPolicyReconciler struct {
 // +kubebuilder:rbac:groups=zerotrust.capstone.io,resources=zerotrustpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=zerotrust.capstone.io,resources=zerotrustpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=zerotrust.capstone.io,resources=zerotrustpolicies/finalizers,verbs=update
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=list;watch;get
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=list;watch;get
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=list;watch;get
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=list;watch;get
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=list;watch;get
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;create;update;patch
 
 // Reconcile loads the cluster baseline policy and runs Phase 1 RBAC / NetworkPolicy detectors.

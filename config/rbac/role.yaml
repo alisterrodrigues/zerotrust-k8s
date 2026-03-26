@@ -7,6 +7,16 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
   - namespaces
   verbs:
   - get
@@ -17,18 +27,30 @@ rules:
   resources:
   - networkpolicies
   verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  - rolebindings
+  verbs:
   - get
   - list
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
-  - clusterrolebindings
   - clusterroles
-  - rolebindings
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - zerotrust.capstone.io

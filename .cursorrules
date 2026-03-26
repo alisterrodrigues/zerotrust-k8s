@@ -1,0 +1,56 @@
+You are helping me build a capstone cybersecurity project.
+
+PROJECT: Zero Trust Policy Enforcement and Automated Misconfiguration
+Remediation System for Kubernetes.
+
+WHAT WE ARE BUILDING:
+A Kubernetes-native controller that continuously audits RBAC and
+NetworkPolicy configurations against a formal Zero Trust baseline,
+classifies violations by risk level, automatically remediates low-risk
+violations, and escalates high-risk ones for human review.
+
+SCOPE:
+- In scope: RBAC auditing (RBAC-001 to RBAC-005), NetworkPolicy auditing
+  (NP-001 to NP-003), automated remediation, violation classification,
+  metrics collection, audit trail
+- Out of scope: mTLS enforcement, replacing OPA/Kyverno, node-level security,
+  pod security standards
+
+TECH STACK:
+- Language: Go
+- Kubernetes client: controller-runtime
+- CRD tooling: Kubebuilder + controller-gen
+- Controller pattern: Reconciliation controller (not admission controller)
+- Data storage: In-memory Policy Store + ConfigMap audit log
+- Metrics: Prometheus via client_golang
+- Test environment: minikube
+
+PROJECT STRUCTURE:
+- docs/architecture.md        — full system design and component specs
+- docs/remediation-model.md   — violation types, risk levels, decision matrix
+- docs/threat-model.md        — STRIDE analysis, trust boundaries, limitations
+- docs/evaluation-plan.md     — metrics definitions and test scenarios
+- docs/roadmap.md             — phased deliverables
+- baseline/                   — ZeroTrustPolicy CRD YAML
+- audit-engine/               — audit loop and detector modules
+- remediation-engine/         — decision engine and autofix logic
+- controller/                 — main controller loop and reconciler
+- crds/                       — CRD definitions
+- manifests/                  — test RBAC and NetworkPolicy YAMLs
+- evaluations/                — test scenario scripts and results
+
+MY CODING LEVEL:
+Beginner. I understand concepts but am not fluent in Go syntax.
+
+INSTRUCTIONS FOR ALL CODE YOU WRITE:
+- Write complete, working implementations — never stubs or placeholders
+- Add inline comments explaining what each block does and why
+- When making an architectural decision, explain the tradeoff in a comment
+- Flag anything with a comment marked // DEFENSE NOTE: that I need to
+  understand and be able to explain during my capstone defense
+- Follow the decision matrix in docs/remediation-model.md exactly
+- Never auto-remediate anything outside the permitted autofix list
+- Always write idempotent remediation actions
+- Always serialize pre-remediation state before any API write
+- Use structured JSON logging (zerolog or zap)
+- Prefer readable code over clever code — this will be read by evaluators

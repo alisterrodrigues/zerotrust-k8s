@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- zerotrust_v1alpha1_zerotrustpolicy.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

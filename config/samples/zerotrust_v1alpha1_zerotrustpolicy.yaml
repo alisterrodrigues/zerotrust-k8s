@@ -1,0 +1,27 @@
+# Example Zero Trust baseline (see docs/architecture.md).
+apiVersion: zerotrust.capstone.io/v1alpha1
+kind: ZeroTrustPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: zerotrust-k8s
+    app.kubernetes.io/managed-by: kustomize
+  name: cluster-baseline
+spec:
+  rbac:
+    denyWildcardVerbs: true
+    denyClusterAdminBinding:
+      excludeServiceAccounts:
+        - system:masters
+        - kube-system/*
+    requireNamespacedRoles: true
+  networkPolicy:
+    requireDefaultDenyIngress: true
+    requireDefaultDenyEgress: false
+    exemptNamespaces:
+      - kube-system
+      - monitoring
+  remediation:
+    mode: auto
+    rateLimit: 5
+    requireApprovalFor:
+      - ClusterAdminBinding

@@ -20,6 +20,7 @@ spec:
     exemptNamespaces:
       - kube-system
       - monitoring
+      - test-exempt
   remediation:
     mode: auto
     rateLimit: 5

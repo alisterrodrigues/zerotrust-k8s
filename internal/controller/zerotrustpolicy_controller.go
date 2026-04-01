@@ -43,6 +43,12 @@ const (
 type ZeroTrustPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// seenViolations records when each distinct violation was first seen in-cluster.
+	// DEFENSE NOTE: seenViolations is an in-memory cache keyed by violation identity. It prevents
+	// the same persistent misconfiguration from being counted multiple times across reconcile cycles,
+	// which would inflate detection metrics and make evaluation data meaningless.
+	seenViolations map[ViolationKey]time.Time
 }
 
 // +kubebuilder:rbac:groups=zerotrust.capstone.io,resources=zerotrustpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -57,6 +63,9 @@ type ZeroTrustPolicyReconciler struct {
 
 // Reconcile loads the cluster baseline policy and runs Phase 1 RBAC / NetworkPolicy detectors.
 func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	cycleStart := time.Now()
+	defer func() { RecordCycleDuration(time.Since(cycleStart).Seconds()) }()
+
 	logger := log.FromContext(ctx)
 
 	if req.Name != clusterBaselineName {
@@ -81,6 +90,40 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	if r.seenViolations == nil {
+		r.seenViolations = make(map[ViolationKey]time.Time)
+	}
+
+	newEvents := make([]ViolationEvent, 0)
+	knownEvents := make([]ViolationEvent, 0, len(events))
+	for _, event := range events {
+		vk := violationKeyFromEvent(event)
+		if _, seen := r.seenViolations[vk]; !seen {
+			newEvents = append(newEvents, event)
+			r.seenViolations[vk] = time.Now().UTC()
+		} else {
+			knownEvents = append(knownEvents, event)
+		}
+	}
+
+	for _, event := range newEvents {
+		RecordViolation(event.ViolationType, event.Namespace, event.RiskLevel)
+	}
+
+	// DEFENSE NOTE: Cache pruning is what makes detection latency measurement accurate. When a violation
+	// is remediated and disappears from the cluster, its key is removed. If the same misconfiguration is
+	// re-introduced, the next detection is counted as a fresh violation — which is exactly what the
+	// evaluation scenario scripts depend on.
+	currentKeys := make(map[ViolationKey]struct{}, len(events))
+	for _, e := range events {
+		currentKeys[violationKeyFromEvent(e)] = struct{}{}
+	}
+	for k := range r.seenViolations {
+		if _, stillActive := currentKeys[k]; !stillActive {
+			delete(r.seenViolations, k)
+		}
+	}
+
 	rateLimit := remediationRateLimit(policy.Spec)
 	autoFixedCount := 0
 	escalatedCount := 0
@@ -101,6 +144,7 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.applyRemediation(ctx, event); err != nil {
 				return ctrl.Result{}, err
 			}
+			RecordRemediation(event.ViolationType, event.Namespace)
 			autoFixedCount++
 		case DecisionActionEscalate:
 			escalatedCount++
@@ -118,6 +162,7 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
+			RecordEscalation(event.ViolationType, event.Namespace)
 		case DecisionActionDryRun:
 			if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
@@ -165,6 +210,7 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
+			RecordEscalation(event.ViolationType, event.Namespace)
 		}
 	}
 
@@ -172,6 +218,10 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		"reconcile cycle summary",
 		"total_violations",
 		len(events),
+		"new_violations",
+		len(newEvents),
+		"known_violations",
+		len(knownEvents),
 		"auto_fixed_count",
 		autoFixedCount,
 		"escalated_count",
@@ -185,10 +235,21 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ZeroTrustPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.seenViolations == nil {
+		r.seenViolations = make(map[ViolationKey]time.Time)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&zerotrustv1alpha1.ZeroTrustPolicy{}).
 		Named("zerotrustpolicy").
 		Complete(r)
+}
+
+func violationKeyFromEvent(e ViolationEvent) ViolationKey {
+	return ViolationKey{
+		ViolationType: e.ViolationType,
+		ResourceName:  e.ResourceName,
+		Namespace:     e.Namespace,
+	}
 }
 
 func remediationRateLimit(spec zerotrustv1alpha1.ZeroTrustPolicySpec) int {

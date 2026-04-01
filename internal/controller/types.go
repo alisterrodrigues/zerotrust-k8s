@@ -18,6 +18,13 @@ package controller
 
 import "time"
 
+// ViolationKey uniquely identifies a persistent violation for deduplication and metrics.
+type ViolationKey struct {
+	ViolationType string
+	ResourceName  string
+	Namespace     string
+}
+
 // ViolationEvent is the detector output consumed by later remediation stages.
 type ViolationEvent struct {
 	ViolationType string

@@ -24,9 +24,9 @@ type ViolationEvent struct {
 	ResourceName  string
 	Namespace     string
 	// DEFENSE NOTE: Allowed values are LOW, HIGH, or CRITICAL per docs/remediation-model.md.
-	RiskLevel string
+	RiskLevel  string
 	DetectedAt time.Time
 	// ResourceSnapshot is the serialized JSON of the resource at detection time.
-	ResourceSnapshot string
+	ResourceSnapshot     string
 	SuggestedRemediation string
 }

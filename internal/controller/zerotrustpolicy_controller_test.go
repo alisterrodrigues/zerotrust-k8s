@@ -49,7 +49,7 @@ var _ = Describe("ZeroTrustPolicy Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: clusterBaselineName},
 					Spec: zerotrustv1alpha1.ZeroTrustPolicySpec{
 						RBAC: &zerotrustv1alpha1.RBACSpec{
-							DenyWildcardVerbs:     &t,
+							DenyWildcardVerbs: &t,
 							DenyClusterAdminBinding: &zerotrustv1alpha1.DenyClusterAdminBindingConfig{
 								ExcludeServiceAccounts: []string{"system:masters", "kube-system/*"},
 							},
@@ -60,8 +60,8 @@ var _ = Describe("ZeroTrustPolicy Controller", func() {
 							ExemptNamespaces:          []string{"kube-system", "kube-public", "kube-node-lease"},
 						},
 						Remediation: &zerotrustv1alpha1.RemediationSpec{
-							Mode:       zerotrustv1alpha1.RemediationModeDryrun,
-							RateLimit:  &rate,
+							Mode:               zerotrustv1alpha1.RemediationModeDryrun,
+							RateLimit:          &rate,
 							RequireApprovalFor: []string{"ClusterAdminBinding"},
 						},
 					},

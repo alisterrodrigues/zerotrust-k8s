@@ -92,6 +92,70 @@ func AppendAuditEntry(ctx context.Context, k8sClient client.Client, entry AuditE
 	return k8sClient.Update(ctx, &cm)
 }
 
+// AppendAuditEntries writes all entries in a single ConfigMap Update,
+// eliminating optimistic concurrency conflicts from per-entry writes.
+//
+// DEFENSE NOTE: Kubernetes uses resourceVersion for optimistic concurrency
+// control. Every successful Update increments resourceVersion. If two
+// goroutines both do Get then Update on the same object, the second Update
+// will fail because its resourceVersion is now stale. By collecting all
+// entries for a cycle into a slice and writing them in one batch, we
+// guarantee at most one write per reconcile cycle regardless of how many
+// violations were found. This is the standard Kubernetes controller pattern
+// for high-frequency writes to a shared object.
+func AppendAuditEntries(ctx context.Context, k8sClient client.Client, entries []AuditEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Marshal all entries into newline-delimited JSON lines first,
+	// before touching the API server.
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, string(encoded)+"\n")
+	}
+
+	key := client.ObjectKey{
+		Name:      auditLogConfigMapName,
+		Namespace: auditLogConfigMapNamespace,
+	}
+
+	var cm corev1.ConfigMap
+	if err := k8sClient.Get(ctx, key, &cm); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+		// ConfigMap doesn't exist yet — create it with all lines combined.
+		combined := strings.Join(lines, "")
+		cm = corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      auditLogConfigMapName,
+				Namespace: auditLogConfigMapNamespace,
+			},
+			Data: map[string]string{
+				auditLogBaseKey: combined,
+			},
+		}
+		return k8sClient.Create(ctx, &cm)
+	}
+
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+
+	// Append each line, respecting the 900KB per-key limit with rollover.
+	for _, line := range lines {
+		targetKey := nextAuditKey(cm.Data, len(line))
+		cm.Data[targetKey] = cm.Data[targetKey] + line
+	}
+
+	return k8sClient.Update(ctx, &cm)
+}
+
 func nextAuditKey(data map[string]string, newLineBytes int) string {
 	if len(data) == 0 {
 		return auditLogBaseKey

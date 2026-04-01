@@ -128,6 +128,7 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	autoFixedCount := 0
 	escalatedCount := 0
 	skippedCount := 0
+	pendingAuditEntries := make([]AuditEntry, 0)
 
 	for _, event := range events {
 		decision := Decide(event, policy.Spec)
@@ -148,7 +149,7 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			autoFixedCount++
 		case DecisionActionEscalate:
 			escalatedCount++
-			if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
 				ViolationType:          event.ViolationType,
 				RiskLevel:              event.RiskLevel,
@@ -159,12 +160,10 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				PreRemediationSnapshot: event.ResourceSnapshot,
 				SuggestedAction:        decision.SuggestedAction,
 				Timestamp:              time.Now().UTC(),
-			}); err != nil {
-				return ctrl.Result{}, err
-			}
+			})
 			RecordEscalation(event.ViolationType, event.Namespace)
 		case DecisionActionDryRun:
-			if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
 				ViolationType:          event.ViolationType,
 				RiskLevel:              event.RiskLevel,
@@ -175,12 +174,10 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				PreRemediationSnapshot: event.ResourceSnapshot,
 				SuggestedAction:        decision.SuggestedAction,
 				Timestamp:              time.Now().UTC(),
-			}); err != nil {
-				return ctrl.Result{}, err
-			}
+			})
 		case DecisionActionSkip:
 			skippedCount++
-			if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
 				ViolationType:          event.ViolationType,
 				RiskLevel:              event.RiskLevel,
@@ -191,12 +188,10 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				PreRemediationSnapshot: event.ResourceSnapshot,
 				SuggestedAction:        decision.SuggestedAction,
 				Timestamp:              time.Now().UTC(),
-			}); err != nil {
-				return ctrl.Result{}, err
-			}
+			})
 		default:
 			escalatedCount++
-			if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
 				ViolationType:          event.ViolationType,
 				RiskLevel:              event.RiskLevel,
@@ -207,11 +202,13 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				PreRemediationSnapshot: event.ResourceSnapshot,
 				SuggestedAction:        event.SuggestedRemediation,
 				Timestamp:              time.Now().UTC(),
-			}); err != nil {
-				return ctrl.Result{}, err
-			}
+			})
 			RecordEscalation(event.ViolationType, event.Namespace)
 		}
+	}
+
+	if err := AppendAuditEntries(ctx, r.Client, pendingAuditEntries); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	logger.Info(

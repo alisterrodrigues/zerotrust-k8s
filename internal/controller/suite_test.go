@@ -26,6 +26,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,6 +87,18 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: clientgoscheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// DEFENSE NOTE: envtest starts a blank Kubernetes environment with no namespaces
+	// except "default". Our controller writes the audit log ConfigMap to "zerotrust-system",
+	// so we must create that namespace here before any test runs Reconcile(). In a real
+	// cluster this namespace is created by setup.sh — in tests we create it manually.
+	By("creating zerotrust-system namespace for audit log writes")
+	ztNamespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: auditLogConfigMapNamespace,
+		},
+	}
+	Expect(k8sClient.Create(ctx, ztNamespace)).To(Succeed())
 })
 
 var _ = AfterSuite(func() {

@@ -15,40 +15,6 @@ every fix session.
 
 ## CRITICAL — Must Fix Before Production
 
-### C-1 — `RequireApprovalFor` field is silently ignored
-**File:** `internal/controller/decision.go`, `api/v1alpha1/zerotrustpolicy_types.go`  
-**Status:** 🔴 OPEN  
-**Description:** The CRD exposes `spec.remediation.requireApprovalFor: ["ClusterAdminBinding"]` as
-a documented security control. The sample CR sets it. But `Decide()` in `decision.go` never reads
-this field. Any violation type listed there is NOT forced to escalate — it goes through the normal
-matrix. An operator setting this field believes they have a safety guarantee they don't have.  
-**Fix:** In `Decide()`, after reading the mode, check if `event.ViolationType` matches any entry
-in `policy.Remediation.RequireApprovalFor`. If so, return `DecisionActionEscalate` immediately
-before consulting the matrix.
-
-### C-2 — NP-001 detection logic is wrong for production
-**File:** `internal/controller/detection.go`, `detectNamespacesWithoutNetworkPolicy`  
-**Status:** 🔴 OPEN  
-**Description:** NP-001 flags a namespace if `len(npList.Items) == 0` — i.e., no NetworkPolicy
-at all. A namespace with a single wide-open `allow-all` NetworkPolicy passes NP-001 with no
-violation. This is fundamentally incorrect for Zero Trust: the check should verify that a
-default-deny ingress policy specifically exists, not just that any NetworkPolicy exists.  
-**Fix:** Change the check to look for a NetworkPolicy where `spec.podSelector` is empty (`{}`)
-AND `spec.policyTypes` contains `Ingress` AND `spec.ingress` is empty (`[]`). If no such policy
-exists, flag NP-001.
-
-### C-3 — `applyRemediation` in `remediation.go` still calls `AppendAuditEntry` individually
-**File:** `internal/controller/remediation.go`  
-**Status:** 🔴 OPEN  
-**Description:** The NP-001 and RBAC-001 autofix paths each call `AppendAuditEntry` (singular)
-after their write. The main reconcile loop uses `AppendAuditEntries` (batch). These two paths
-can race on ConfigMap `resourceVersion` during startup when multiple autofixes fire in the same
-burst cycle. The startup conflict errors seen in sessions are caused by this.  
-**Fix:** Change `applyDefaultDenyIngressForNP001` and `removeWildcardVerbsForRBAC001Low` to
-return an `AuditEntry` value to the caller instead of writing it themselves. The caller
-(`applyRemediation`) returns it. The main loop appends it to `pendingAuditEntries` and writes
-it in the single batch call after the loop.
-
 ### C-4 — RBAC-003 only checks `ClusterRoleBinding`, not namespaced `RoleBinding` to cluster-admin
 **File:** `internal/controller/detection.go`, `detectClusterAdminBindings`  
 **Status:** 🔴 OPEN  
@@ -72,42 +38,6 @@ for up to 30 seconds before detection. In production a watch would trigger immed
 **Fix:** Add `.Watches()` calls in `SetupWithManager` for ClusterRole, ClusterRoleBinding,
 NetworkPolicy, and Namespace with an `EnqueueRequestsFromMapFunc` that always returns the
 cluster-baseline key.
-
-### H-2 — `RecordEscalation` called before audit write succeeds
-**File:** `internal/controller/zerotrustpolicy_controller.go`  
-**Status:** 🔴 OPEN  
-**Description:** In the ESCALATE and default cases, `RecordEscalation()` is called inside the
-for loop immediately after appending to `pendingAuditEntries`. But `AppendAuditEntries` doesn't
-run until after the loop. If the audit write fails and the reconciler returns an error, the
-Prometheus escalation counter has already been incremented but the audit entry was never
-persisted. On retry the counter increments again for the same event.  
-**Fix:** Move all `RecordEscalation` calls to after `AppendAuditEntries` succeeds.
-
-### H-3 — `RateLimit` CRD comment says "per minute", enforcement is per cycle (30s)
-**File:** `api/v1alpha1/zerotrustpolicy_types.go`  
-**Status:** 🔴 OPEN  
-**Description:** The CRD field comment reads "maximum number of remediations applied per minute".
-The actual enforcement in `remediationRateLimit()` resets the counter each reconcile cycle
-(every 30 seconds). The comment is wrong by 2x.  
-**Fix:** Update the field comment to "per reconcile cycle (default 30s interval)".
-
-### H-4 — `buildAuditEntryID` uses second-granularity timestamps causing duplicate IDs
-**File:** `internal/controller/zerotrustpolicy_controller.go`  
-**Status:** 🟡 WARN  
-**Description:** `buildAuditEntryID` formats time as `20060102150405` (second precision).
-Multiple violations of the same type against the same resource in the same second produce
-identical EntryIDs. In steady state this doesn't matter, but under burst conditions or in
-tests it can cause log confusion.  
-**Fix:** Use nanosecond precision: `time.Now().UTC().Format("20060102150405.000000000")` or
-append a short random suffix using `fmt.Sprintf("%s-%04d", ..., rand.Intn(10000))`.
-
-### H-5 — `json.Marshal(ns)` result discarded in `applyDefaultDenyIngressForNP001`
-**File:** `internal/controller/remediation.go`  
-**Status:** 🟡 WARN  
-**Description:** `applyDefaultDenyIngressForNP001` calls `json.Marshal(ns)` and discards
-the result. This is dead code — the snapshot is already captured in `event.ResourceSnapshot`
-by the detector. The marshal call adds latency with no benefit.  
-**Fix:** Remove the `json.Marshal(ns)` call entirely.
 
 ---
 
@@ -193,3 +123,10 @@ Roles would suffice.
   prevent 1MB overflow across sessions
 - ✅ FIXED 2026-04-02 — README updated to reflect actual directory structure and Phase 3 status
 - ✅ FIXED 2026-04-02 — `.gitignore` updated to exclude `.DS_Store`
+- ✅ FIXED 2026-04-09 — C-1: `RequireApprovalFor` now enforced in `Decide()` via `approvalRequired()` helper with alias map
+- ✅ FIXED 2026-04-09 — C-2: NP-001 now checks for default-deny ingress specifically via `hasDefaultDenyIngress()`, not just any NetworkPolicy
+- ✅ FIXED 2026-04-09 — C-3: `applyRemediation` now returns `*AuditEntry` to caller; no more individual `AppendAuditEntry` calls in remediation path
+- ✅ FIXED 2026-04-09 — H-2: `RecordEscalation` moved to after `AppendAuditEntries` succeeds
+- ✅ FIXED 2026-04-09 — H-3: `RateLimit` field comment corrected to "per reconcile cycle (default interval: 30 seconds)"
+- ✅ FIXED 2026-04-09 — H-4: `buildAuditEntryID` now uses nanosecond-precision timestamps
+- ✅ FIXED 2026-04-09 — H-5: Dead `json.Marshal(ns)` call removed from `applyDefaultDenyIngressForNP001`

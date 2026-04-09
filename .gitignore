@@ -31,3 +31,4 @@ go.work
 
 # macOS metadata
 .DS_Store
+.claude/

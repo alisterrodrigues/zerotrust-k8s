@@ -84,7 +84,9 @@ type RemediationSpec struct {
 	// +optional
 	Mode RemediationMode `json:"mode,omitempty"`
 
-	// RateLimit is the maximum number of remediations applied per minute (e.g. 5).
+	// RateLimit is the maximum number of remediations applied per reconcile cycle
+	// (default interval: 30 seconds). For example, 5 means at most 5 auto-remediations
+	// per 30-second cycle; excess violations are escalated for human review.
 	// +kubebuilder:default=5
 	// +kubebuilder:validation:Minimum=1
 	// +optional

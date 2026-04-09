@@ -142,8 +142,16 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 		switch decision.Action {
 		case DecisionActionAutoFix:
-			if err := r.applyRemediation(ctx, event); err != nil {
+			// DEFENSE NOTE: By returning the AuditEntry from the autofix functions instead of
+			// writing it inline, all audit writes for a cycle flow through the single
+			// AppendAuditEntries batch call below. This guarantees at most one ConfigMap write
+			// per reconcile cycle regardless of how many violations were found or remediated.
+			remAuditEntry, err := r.applyRemediation(ctx, event)
+			if err != nil {
 				return ctrl.Result{}, err
+			}
+			if remAuditEntry != nil {
+				pendingAuditEntries = append(pendingAuditEntries, *remAuditEntry)
 			}
 			RecordRemediation(event.ViolationType, event.Namespace)
 			autoFixedCount++
@@ -161,7 +169,6 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				SuggestedAction:        decision.SuggestedAction,
 				Timestamp:              time.Now().UTC(),
 			})
-			RecordEscalation(event.ViolationType, event.Namespace)
 		case DecisionActionDryRun:
 			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 				EntryID:                buildAuditEntryID(event),
@@ -203,12 +210,22 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				SuggestedAction:        event.SuggestedRemediation,
 				Timestamp:              time.Now().UTC(),
 			})
-			RecordEscalation(event.ViolationType, event.Namespace)
 		}
 	}
 
 	if err := AppendAuditEntries(ctx, r.Client, pendingAuditEntries); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// DEFENSE NOTE: Recording escalation metrics only after the audit write succeeds prevents
+	// double-counting on retry. If AppendAuditEntries fails and the reconciler returns an error,
+	// controller-runtime requeues the entire cycle. Moving RecordEscalation here means metrics
+	// and audit state stay consistent — a counter increment only happens when the audit record
+	// is confirmed persisted.
+	for _, entry := range pendingAuditEntries {
+		if entry.Action == "ESCALATED" {
+			RecordEscalation(entry.ViolationType, entry.Namespace)
+		}
 	}
 
 	logger.Info(
@@ -264,9 +281,12 @@ func remediationRateLimit(spec zerotrustv1alpha1.ZeroTrustPolicySpec) int {
 func buildAuditEntryID(event ViolationEvent) string {
 	normalizedResource := strings.ReplaceAll(event.ResourceName, "/", "-")
 	normalizedResource = strings.ReplaceAll(normalizedResource, " ", "-")
+	// DEFENSE NOTE: Nanosecond precision prevents duplicate EntryIDs when multiple violations
+	// of the same type fire against the same resource within a single second — for example during
+	// burst evaluation scenarios where many namespaces are created simultaneously.
 	return fmt.Sprintf(
 		"aud-%s-%s-%s",
-		time.Now().UTC().Format("20060102150405"),
+		time.Now().UTC().Format("20060102150405.000000000"),
 		strings.ToLower(event.ViolationType),
 		strings.ToLower(normalizedResource),
 	)

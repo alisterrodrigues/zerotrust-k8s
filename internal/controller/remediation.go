@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -38,22 +37,37 @@ const (
 	ssaFieldManagerName                 = "ztk8s-controller"
 )
 
-// applyRemediation executes supported AUTO_FIX actions.
-func (r *ZeroTrustPolicyReconciler) applyRemediation(ctx context.Context, event ViolationEvent) error {
+// applyRemediation executes supported AUTO_FIX actions and returns the AuditEntry to record,
+// or nil if no action was taken (idempotent no-op or unimplemented type).
+//
+// DEFENSE NOTE: By returning the AuditEntry from the autofix functions instead of writing it
+// inline, all audit writes for a cycle — whether from escalations, dry-runs, skips, or autofixes
+// — flow through the single AppendAuditEntries batch call at the end of the reconcile loop.
+// This guarantees at most one ConfigMap write per reconcile cycle regardless of how many
+// violations were found or remediated.
+func (r *ZeroTrustPolicyReconciler) applyRemediation(ctx context.Context, event ViolationEvent) (*AuditEntry, error) {
 	if event.Namespace == "kube-system" {
 		log.Warn().
 			Str("violationType", event.ViolationType).
 			Str("namespace", event.Namespace).
 			Msg("skipping remediation in kube-system namespace")
-		return nil
+		return nil, nil
 	}
 
 	if event.ViolationType == "NP-001" {
-		return r.applyDefaultDenyIngressForNP001(ctx, event)
+		entry, err := r.applyDefaultDenyIngressForNP001(ctx, event)
+		if err != nil {
+			return nil, err
+		}
+		return entry, nil
 	}
 
 	if event.ViolationType == "RBAC-001" && event.RiskLevel == "LOW" {
-		return r.removeWildcardVerbsForRBAC001Low(ctx, event)
+		entry, err := r.removeWildcardVerbsForRBAC001Low(ctx, event)
+		if err != nil {
+			return nil, err
+		}
+		return entry, nil
 	}
 
 	log.Info().
@@ -61,10 +75,13 @@ func (r *ZeroTrustPolicyReconciler) applyRemediation(ctx context.Context, event 
 		Str("resourceName", event.ResourceName).
 		Str("namespace", event.Namespace).
 		Msg("no autofix implemented for type")
-	return nil
+	return nil, nil
 }
 
-func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.Context, event ViolationEvent) error {
+// applyDefaultDenyIngressForNP001 applies a default-deny ingress NetworkPolicy to the namespace.
+// Returns (nil, nil) when the action is a safe no-op (namespace gone, or policy already exists).
+// Returns (*AuditEntry, nil) on success so the caller can batch the write.
+func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.Context, event ViolationEvent) (*AuditEntry, error) {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, types.NamespacedName{Name: event.Namespace}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -72,12 +89,9 @@ func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.
 				Str("violationType", event.ViolationType).
 				Str("namespace", event.Namespace).
 				Msg("namespace no longer exists; remediation is idempotent no-op")
-			return nil
+			return nil, nil
 		}
-		return err
-	}
-	if _, err := json.Marshal(ns); err != nil {
-		return err
+		return nil, err
 	}
 
 	defaultDeny := &netv1.NetworkPolicy{
@@ -103,10 +117,16 @@ func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.
 	// DEFENSE NOTE: Server-Side Apply is used instead of Create/Update because it is declarative
 	// and idempotent. Re-applying the same intent becomes a no-op rather than a duplicate-write error.
 	if err := r.Patch(ctx, defaultDeny, client.Apply, client.FieldOwner(ssaFieldManagerName)); err != nil {
-		return err
+		return nil, err
 	}
 
-	if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+	log.Info().
+		Str("violationType", "NP-001").
+		Str("namespace", event.Namespace).
+		Str("action", "AUTO_REMEDIATED").
+		Msg("applied default-deny NetworkPolicy")
+
+	entry := AuditEntry{
 		EntryID:                remediationAuditEntryID(event.ViolationType, defaultDenyIngressNetworkPolicyName),
 		ViolationType:          event.ViolationType,
 		RiskLevel:              event.RiskLevel,
@@ -117,19 +137,14 @@ func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.
 		PreRemediationSnapshot: event.ResourceSnapshot,
 		SuggestedAction:        "",
 		Timestamp:              time.Now().UTC(),
-	}); err != nil {
-		return err
 	}
-
-	log.Info().
-		Str("violationType", "NP-001").
-		Str("namespace", event.Namespace).
-		Str("action", "AUTO_REMEDIATED").
-		Msg("applied default-deny NetworkPolicy")
-	return nil
+	return &entry, nil
 }
 
-func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context.Context, event ViolationEvent) error {
+// removeWildcardVerbsForRBAC001Low removes wildcard verbs from the named ClusterRole.
+// Returns (nil, nil) when the action is a safe no-op (role gone, or already clean).
+// Returns (*AuditEntry, nil) on success so the caller can batch the write.
+func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context.Context, event ViolationEvent) (*AuditEntry, error) {
 	var role rbacv1.ClusterRole
 	if err := r.Get(ctx, types.NamespacedName{Name: event.ResourceName}, &role); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -137,9 +152,9 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 				Str("violationType", event.ViolationType).
 				Str("resourceName", event.ResourceName).
 				Msg("ClusterRole no longer exists; remediation is idempotent no-op")
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 
 	if !clusterRoleHasWildcardVerbs(role.Rules) {
@@ -147,7 +162,7 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 			Str("violationType", event.ViolationType).
 			Str("resourceName", event.ResourceName).
 			Msg("already remediated")
-		return nil
+		return nil, nil
 	}
 
 	patched := role.DeepCopy()
@@ -162,10 +177,16 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 	// DEFENSE NOTE: RBAC-001 is a surgical edit of an existing role, so Update is clearer than SSA
 	// full-state ownership. The snapshot in the audit entry is the rollback record for human recovery.
 	if err := r.Update(ctx, patched); err != nil {
-		return err
+		return nil, err
 	}
 
-	if err := AppendAuditEntry(ctx, r.Client, AuditEntry{
+	log.Info().
+		Str("violationType", "RBAC-001").
+		Str("resourceName", event.ResourceName).
+		Str("action", "AUTO_REMEDIATED").
+		Msg("removed wildcard verbs from ClusterRole")
+
+	entry := AuditEntry{
 		EntryID:                remediationAuditEntryID("RBAC-001", event.ResourceName),
 		ViolationType:          "RBAC-001",
 		RiskLevel:              event.RiskLevel,
@@ -176,16 +197,8 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 		PreRemediationSnapshot: event.ResourceSnapshot,
 		SuggestedAction:        "Review replaced verbs — default is get;list;watch",
 		Timestamp:              time.Now().UTC(),
-	}); err != nil {
-		return err
 	}
-
-	log.Info().
-		Str("violationType", "RBAC-001").
-		Str("resourceName", event.ResourceName).
-		Str("action", "AUTO_REMEDIATED").
-		Msg("removed wildcard verbs from ClusterRole")
-	return nil
+	return &entry, nil
 }
 
 func clusterRoleHasWildcardVerbs(rules []rbacv1.PolicyRule) bool {

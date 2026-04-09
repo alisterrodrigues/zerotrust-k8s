@@ -307,7 +307,12 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		if err := r.List(ctx, &npList, client.InNamespace(ns.Name)); err != nil {
 			return nil, err
 		}
-		if len(npList.Items) == 0 {
+		// DEFENSE NOTE: Checking for the presence of ANY NetworkPolicy was a logic gap — a
+		// wide-open allow-all policy technically satisfies "has a NetworkPolicy" but provides
+		// zero Zero Trust protection. The correct check verifies that a default-deny ingress
+		// policy specifically exists: empty podSelector (selects all pods), Ingress in
+		// policyTypes, and empty ingress rules (blocks all ingress traffic).
+		if !hasDefaultDenyIngress(npList.Items) {
 			risk := np001Risk(ns.Name)
 			logViolation("NP-001", ns.Name, ns.Name, risk)
 			event, err := newViolationEvent(
@@ -325,6 +330,36 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		}
 	}
 	return events, nil
+}
+
+// hasDefaultDenyIngress returns true if policies contains at least one NetworkPolicy that
+// acts as a proper default-deny ingress rule. All three criteria must be met:
+//  1. spec.podSelector is empty — selects every pod in the namespace.
+//  2. spec.policyTypes contains "Ingress" — the policy applies to inbound traffic.
+//  3. spec.ingress is nil or empty — no ingress traffic is permitted.
+func hasDefaultDenyIngress(policies []netv1.NetworkPolicy) bool {
+	for _, pol := range policies {
+		// Criterion 1: podSelector must be empty (no label filters — selects all pods).
+		if len(pol.Spec.PodSelector.MatchLabels) != 0 || len(pol.Spec.PodSelector.MatchExpressions) != 0 {
+			continue
+		}
+		// Criterion 2: policyTypes must explicitly include Ingress.
+		hasIngressType := false
+		for _, pt := range pol.Spec.PolicyTypes {
+			if pt == netv1.PolicyTypeIngress {
+				hasIngressType = true
+				break
+			}
+		}
+		if !hasIngressType {
+			continue
+		}
+		// Criterion 3: ingress rules must be absent or empty — zero allowed ingress traffic.
+		if len(pol.Spec.Ingress) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func exemptionSet(names []string) map[string]struct{} {

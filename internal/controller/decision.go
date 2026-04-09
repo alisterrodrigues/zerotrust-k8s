@@ -16,7 +16,11 @@ limitations under the License.
 
 package controller
 
-import zerotrustv1alpha1 "github.com/capstone/zerotrust-k8s/api/v1alpha1"
+import (
+	"strings"
+
+	zerotrustv1alpha1 "github.com/capstone/zerotrust-k8s/api/v1alpha1"
+)
 
 const (
 	DecisionActionAutoFix  = "AUTO_FIX"
@@ -38,6 +42,21 @@ type RemediationDecision struct {
 func Decide(event ViolationEvent, policy ZeroTrustPolicySpec) RemediationDecision {
 	decision := decisionFromMatrix(event)
 	mode := remediationModeFromSpec(policy)
+
+	// DEFENSE NOTE: RequireApprovalFor is a CRD-level safety control that lets cluster operators
+	// declare certain violation classes as always requiring human sign-off, regardless of risk level.
+	// This prevents automated remediation of politically sensitive or high-impact resource types
+	// even when the risk matrix would normally allow AUTO_FIX. It is checked before mode overrides
+	// so that manual approval intent cannot be accidentally overridden by mode=auto.
+	if policy.Remediation != nil && len(policy.Remediation.RequireApprovalFor) > 0 {
+		if approvalRequired(event.ViolationType, policy.Remediation.RequireApprovalFor) {
+			return RemediationDecision{
+				Action:          DecisionActionEscalate,
+				Reason:          "violation type in requireApprovalFor list — human review required",
+				SuggestedAction: decision.SuggestedAction,
+			}
+		}
+	}
 
 	// DEFENSE NOTE: Manual and dryrun are explicit safety controls. They intentionally override
 	// normal matrix outcomes to reduce blast radius during validation or human-only review phases.
@@ -132,4 +151,34 @@ func remediationModeFromSpec(spec ZeroTrustPolicySpec) string {
 		return "auto"
 	}
 	return mode
+}
+
+// approvalRequired returns true if violationType matches any entry in requireApprovalFor.
+// Matching is case-insensitive. Human-readable aliases in the CRD are resolved to canonical
+// violation type codes before comparison.
+func approvalRequired(violationType string, requireApprovalFor []string) bool {
+	// aliasMap translates the human-friendly names accepted by the CRD field to their canonical
+	// violation type codes. Operators write e.g. "ClusterAdminBinding" in their policy YAML
+	// rather than memorising "RBAC-003".
+	aliasMap := map[string]string{
+		"clusteradminbinding":  "RBAC-003",
+		"wildcardverbs":        "RBAC-001",
+		"wildcardresources":    "RBAC-002",
+		"missingnetworkpolicy": "NP-001",
+	}
+	vtLower := strings.ToLower(violationType)
+	for _, entry := range requireApprovalFor {
+		entryLower := strings.ToLower(strings.TrimSpace(entry))
+		// Direct case-insensitive match on the violation type code itself (e.g. "RBAC-001").
+		if entryLower == vtLower {
+			return true
+		}
+		// Alias match: resolve the alias to a canonical code and compare.
+		if canonical, ok := aliasMap[entryLower]; ok {
+			if strings.ToLower(canonical) == vtLower {
+				return true
+			}
+		}
+	}
+	return false
 }

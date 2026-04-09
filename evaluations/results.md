@@ -73,18 +73,18 @@
 
 **Definition:** Fraction of audit events generated for resources that are correctly exempt from Zero Trust policy enforcement.
 
-**Method:** `evaluations/scenarios/03-false-positive.sh` — creates a ClusterRole and namespace that match the `exemptNamespaces` and exclusion lists in the `cluster-baseline` CR. Verifies no violation or audit entry is generated for these resources.
+**Method:** `evaluations/scenarios/03-false-positive.sh` — verifies that resources intentionally excluded from enforcement do not generate violations or trigger remediation. Test 1 checks that `test-exempt` (listed in `spec.networkPolicy.exemptNamespaces`) does not appear in violation metrics. Test 2 checks that `kube-system` (a system namespace) is not auto-remediated by NP-001 despite having no default-deny NetworkPolicy.
 
 **Results:**
 
 | Test | Resource | Expected | Observed | Pass? |
 |------|----------|----------|----------|-------|
-| 1 | Exempt namespace | No NP-001 violation | No violation detected | ✅ PASS |
-| 2 | Excluded ClusterRole | No RBAC-001 violation | No violation detected | ✅ PASS |
+| 1 | `test-exempt` namespace (exemptNamespaces list) | No NP-001 violation in metrics | No violation detected | ✅ PASS |
+| 2 | `kube-system` namespace (system namespace) | Not auto-remediated by NP-001 | No `ztk8s-default-deny-ingress` applied | ✅ PASS |
 
 **FALSE_POSITIVE_RATE = 0 (0 false positives out of 2 tests)**
 
-**Interpretation:** The exclusion and exemption logic in the detectors correctly suppresses violations for resources that are intentionally permitted under the declared policy. No spurious remediation or escalation events were generated.
+**Interpretation:** The exemption and system-namespace protection logic correctly suppresses violations and auto-remediation for excluded resources. `test-exempt` never appears in violation metrics because it is in the `exemptNamespaces` list. `kube-system` receives a CRITICAL risk classification from `np001Risk()` which maps to `SKIP` in the decision matrix, preventing any corrective write. No spurious remediation or escalation events were generated for either resource.
 
 ---
 
@@ -147,6 +147,7 @@ All five evaluation metrics have been measured. The system demonstrates sub-30-s
 ## Known Limitations
 
 - **Single-node testbed:** All measurements were taken on a minikube single-node cluster. Multi-node production environments may exhibit different latency characteristics due to API server load and etcd write latency.
-- **Startup burst behavior:** The first 1–2 reconcile cycles after controller startup may exhibit ConfigMap write conflicts as `applyRemediation()` in `remediation.go` calls `AppendAuditEntry` individually. This resolves within one cycle and does not affect steady-state operation or evaluation data integrity. Documented as acceptable for capstone scope.
+- **Audit write ordering:** Remediation API writes (NetworkPolicy create, ClusterRole update) occur before the audit ConfigMap batch write. If the audit write fails on a given cycle, the cluster change is already applied but has no audit record until the next successful reconcile cycle. The controller retries automatically and the record is written on the next cycle.
 - **RBAC-001 latency variance:** High standard deviation (±10.7s) reflects the stochastic arrival time of violations relative to the 30-second reconcile boundary. This is a fundamental property of periodic reconcilers and not a system defect.
 - **NP-001 outlier trials:** Three trials (111ms, 30,268ms, 11,935ms) were excluded from the primary analysis set due to boundary effects. All raw data is recorded above for transparency.
+- **In-memory deduplication:** The `seenViolations` cache is in-memory only. A controller restart causes all active violations to be re-detected as new in the first cycle post-restart. This does not affect evaluation data integrity as all measurements were taken in steady-state operation.

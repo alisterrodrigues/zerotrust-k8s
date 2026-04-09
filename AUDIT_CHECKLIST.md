@@ -21,14 +21,6 @@ every fix session.
 **Description:** Both `hasWildcardVerb` and `hasWildcardResource` are checked under the single
 `DenyWildcardVerbs` flag. RBAC-002 cannot be independently toggled. CRD design inconsistency.
 
-### NF-6 — `results.md` false-positive test description does not match the script
-**File:** `evaluations/results.md`, `evaluations/scenarios/03-false-positive.sh`  
-**Status:** 🔴 OPEN  
-**Description:** The results table for Metric 3 (False Positive Rate) states Test 2 verified
-"Excluded ClusterRole — No RBAC-001 violation". The actual script checks "kube-system namespace
-should not be auto-remediated for NP-001". The documented test was never run.  
-**Fix:** Update `results.md` row 2 to accurately describe what was actually measured.
-
 ---
 
 ## LOW — Polish, Scalability, and Test Coverage
@@ -85,4 +77,5 @@ a single cluster-wide `r.List(ctx, &rbList)` then filter in memory for productio
 - ✅ FIXED 2026-04-09 — NF-3: `np001Risk` converted to method; checks pod phase (Running/Pending → HIGH)
 - ✅ FIXED 2026-04-09 — NF-4: RBAC-001 autofix returns `nil, nil` when `*` is sole verb; no invented verbs
 - ✅ FIXED 2026-04-09 — NF-5: `hasDefaultDenyIngress` accepts implicit default-deny (empty `policyTypes`)
+- ✅ FIXED 2026-04-09 — NF-6: `results.md` Metric 3 Test 2 description corrected; stale Known Limitations note updated
 - ✅ FIXED 2026-04-09 — NF-8: `kube-system` guard in `applyRemediation` annotated as intentional defense-in-depth

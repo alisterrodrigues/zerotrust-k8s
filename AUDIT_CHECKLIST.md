@@ -13,36 +13,7 @@ every fix session.
 
 ---
 
-## HIGH — Fix Soon, Before New Feature Work
-
-### H-1 — Controller has no watches on audited resource types
-**File:** `internal/controller/zerotrustpolicy_controller.go`, `SetupWithManager`  
-**Status:** 🔴 OPEN  
-**Description:** `SetupWithManager` only calls `.For(&ZeroTrustPolicy{})`. No watches on
-`ClusterRole`, `ClusterRoleBinding`, `NetworkPolicy`, or `Namespace`. Misconfigurations
-introduced between 30-second cycles go undetected until the next poll.  
-**Fix:** Add `.Watches()` calls for ClusterRole, ClusterRoleBinding, NetworkPolicy, and Namespace
-with an `EnqueueRequestsFromMapFunc` that always returns the cluster-baseline key.
-
----
-
-## MEDIUM — Detection Breadth (Unimplemented Spec Items)
-
-### M-1 — RBAC-004 not implemented (namespaced Role wildcard verbs)
-**File:** `internal/controller/detection.go`  
-**Status:** 🔴 OPEN  
-**Description:** Wildcard verb detection on namespaced `Role` objects. Only ClusterRoles scanned.
-
-### M-2 — RBAC-005 not implemented (namespaced Role wildcard resources)
-**File:** `internal/controller/detection.go`  
-**Status:** 🔴 OPEN  
-**Description:** Wildcard resource detection on namespaced `Role` objects. Only ClusterRoles scanned.
-
-### M-3 — NP-002 not implemented (missing default-deny egress)
-**File:** `internal/controller/detection.go`  
-**Status:** 🔴 OPEN  
-**Description:** `spec.networkPolicy.requireDefaultDenyEgress` is a CRD field that is read
-but never acted upon. No egress NetworkPolicy detector exists.
+## MEDIUM — Open Items
 
 ### M-4 — `DenyWildcardVerbs` flag silently controls RBAC-002 detection
 **File:** `internal/controller/detection.go`  
@@ -101,10 +72,14 @@ a single cluster-wide `r.List(ctx, &rbList)` then filter in memory for productio
 - ✅ FIXED 2026-04-09 — C-2: NP-001 checks for default-deny ingress via `hasDefaultDenyIngress()`
 - ✅ FIXED 2026-04-09 — C-3: `applyRemediation` returns `*AuditEntry`; no inline `AppendAuditEntry` calls
 - ✅ FIXED 2026-04-09 — C-4: RBAC-003 now iterates namespaced RoleBindings to cluster-admin
+- ✅ FIXED 2026-04-09 — H-1: Event-driven watches added for ClusterRole, ClusterRoleBinding, RoleBinding, NetworkPolicy, Namespace
 - ✅ FIXED 2026-04-09 — H-2: `RecordEscalation` moved to after `AppendAuditEntries` succeeds
 - ✅ FIXED 2026-04-09 — H-3: `RateLimit` field comment corrected to "per reconcile cycle (30s)"
 - ✅ FIXED 2026-04-09 — H-4: `buildAuditEntryID` uses nanosecond-precision timestamps
 - ✅ FIXED 2026-04-09 — H-5: Dead `json.Marshal(ns)` call removed from `applyDefaultDenyIngressForNP001`
+- ✅ FIXED 2026-04-09 — M-1: RBAC-004 detector implemented (namespaced Role wildcard verbs, HIGH)
+- ✅ FIXED 2026-04-09 — M-2: RBAC-005 detector implemented (namespaced Role wildcard resources, HIGH)
+- ✅ FIXED 2026-04-09 — M-3: NP-002 detector implemented (missing default-deny egress, detection-only)
 - ✅ FIXED 2026-04-09 — NF-1: `autoFixedCount++` gated on non-nil `remAuditEntry` (no-ops don't consume rate limit)
 - ✅ FIXED 2026-04-09 — NF-2: `RecordRemediation` moved to post-`AppendAuditEntries` loop, mirrors escalation pattern
 - ✅ FIXED 2026-04-09 — NF-3: `np001Risk` converted to method; checks pod phase (Running/Pending → HIGH)

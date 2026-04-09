@@ -219,6 +219,47 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 			events = append(events, event)
 		}
 	}
+	// DEFENSE NOTE: A namespaced RoleBinding can reference cluster-admin as its roleRef.
+	// This is uncommon but valid Kubernetes and grants cluster-admin permissions scoped
+	// to the namespace of the binding. Without checking namespaced RoleBindings, an
+	// attacker who creates such a binding is completely invisible to RBAC-003 detection.
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList); err != nil {
+		return nil, err
+	}
+	for i := range nsList.Items {
+		nsName := nsList.Items[i].Name
+		var rbList rbacv1.RoleBindingList
+		if err := r.List(ctx, &rbList, client.InNamespace(nsName)); err != nil {
+			return nil, err
+		}
+		for j := range rbList.Items {
+			rb := &rbList.Items[j]
+			if !roleRefPointsToClusterRole(rb.RoleRef, clusterAdminClusterRole) {
+				continue
+			}
+			for _, sub := range rb.Subjects {
+				if subjectMatchesExclusion(sub, excludePatterns) {
+					continue
+				}
+				risk := rbac003Risk(sub)
+				logViolation("RBAC-003", rb.Name, nsName, risk)
+				event, err := newViolationEvent(
+					"RBAC-003",
+					rb.Name,
+					nsName,
+					risk,
+					rb,
+					"Review non-whitelisted cluster-admin RoleBinding and revoke or scope it.",
+				)
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, event)
+			}
+		}
+	}
+
 	return events, nil
 }
 
@@ -313,7 +354,10 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		// policy specifically exists: empty podSelector (selects all pods), Ingress in
 		// policyTypes, and empty ingress rules (blocks all ingress traffic).
 		if !hasDefaultDenyIngress(npList.Items) {
-			risk := np001Risk(ns.Name)
+			risk, err := r.np001Risk(ctx, ns.Name)
+			if err != nil {
+				return nil, err
+			}
 			logViolation("NP-001", ns.Name, ns.Name, risk)
 			event, err := newViolationEvent(
 				"NP-001",
@@ -343,12 +387,22 @@ func hasDefaultDenyIngress(policies []netv1.NetworkPolicy) bool {
 		if len(pol.Spec.PodSelector.MatchLabels) != 0 || len(pol.Spec.PodSelector.MatchExpressions) != 0 {
 			continue
 		}
-		// Criterion 2: policyTypes must explicitly include Ingress.
+		// Criterion 2: policyTypes must include Ingress (explicit) OR be empty (implicit).
+		// Kubernetes docs state: when policyTypes is omitted and the policy has no ingress
+		// rules, the policy is treated as a default-deny ingress policy by the network plugin.
+		// DEFENSE NOTE: Older manifests commonly omit policyTypes. Requiring explicit
+		// declaration causes false-positive NP-001 violations for already-compliant namespaces,
+		// producing redundant remediation writes every 30 seconds.
 		hasIngressType := false
-		for _, pt := range pol.Spec.PolicyTypes {
-			if pt == netv1.PolicyTypeIngress {
-				hasIngressType = true
-				break
+		if len(pol.Spec.PolicyTypes) == 0 {
+			// Implicit ingress isolation: omitted policyTypes + empty ingress rules = default-deny ingress.
+			hasIngressType = true
+		} else {
+			for _, pt := range pol.Spec.PolicyTypes {
+				if pt == netv1.PolicyTypeIngress {
+					hasIngressType = true
+					break
+				}
 			}
 		}
 		if !hasIngressType {
@@ -370,12 +424,30 @@ func exemptionSet(names []string) map[string]struct{} {
 	return out
 }
 
-// np001Risk follows docs/remediation-model.md for NP-001 (exempt namespaces are never evaluated here).
-func np001Risk(namespace string) string {
+// np001Risk returns NP-001 risk level following docs/remediation-model.md:
+//
+//	kube-system                           → CRITICAL (never auto-remediated)
+//	namespace with Running or Pending pods → HIGH (escalate for human review)
+//	empty namespace                        → LOW (safe to auto-remediate)
+//
+// DEFENSE NOTE: A namespace with live workloads must NOT be silently auto-remediated
+// with a default-deny policy — this would block all new ingress connections without
+// operator sign-off. Only empty namespaces are safe to auto-fix.
+func (r *ZeroTrustPolicyReconciler) np001Risk(ctx context.Context, namespace string) (string, error) {
 	if namespace == metav1NamespaceKubeSystem {
-		return "CRITICAL"
+		return "CRITICAL", nil
 	}
-	return "LOW"
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(namespace)); err != nil {
+		return "", err
+	}
+	for i := range podList.Items {
+		phase := podList.Items[i].Status.Phase
+		if phase == corev1.PodRunning || phase == corev1.PodPending {
+			return "HIGH", nil
+		}
+	}
+	return "LOW", nil
 }
 
 const metav1NamespaceKubeSystem = "kube-system"

@@ -46,6 +46,10 @@ const (
 // This guarantees at most one ConfigMap write per reconcile cycle regardless of how many
 // violations were found or remediated.
 func (r *ZeroTrustPolicyReconciler) applyRemediation(ctx context.Context, event ViolationEvent) (*AuditEntry, error) {
+	// DEFENSE NOTE: This guard is intentional defense-in-depth. Under normal code paths,
+	// kube-system violations get CRITICAL risk from np001Risk → SKIP from the decision
+	// matrix → never reach applyRemediation. This guard exists as a secondary safety net
+	// in case a future code path bypasses the decision matrix. Do not remove.
 	if event.Namespace == "kube-system" {
 		log.Warn().
 			Str("violationType", event.ViolationType).
@@ -166,12 +170,26 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 	}
 
 	patched := role.DeepCopy()
+	safeToFix := true
 	for i := range patched.Rules {
 		filtered := removeWildcardVerb(patched.Rules[i].Verbs)
 		if len(filtered) == 0 {
-			filtered = []string{"get", "list", "watch"}
+			// DEFENSE NOTE: When * is the only verb in a rule, removing it would leave
+			// the rule with no verbs, requiring us to invent a replacement. Inventing
+			// verbs (e.g. get,list,watch) is unsafe — the original role may legitimately
+			// need write access, and silently downgrading it can break workloads or
+			// preserve unintended access. Escalate instead.
+			safeToFix = false
+			break
 		}
 		patched.Rules[i].Verbs = filtered
+	}
+	if !safeToFix {
+		log.Info().
+			Str("violationType", "RBAC-001").
+			Str("resourceName", event.ResourceName).
+			Msg("wildcard-only verb rule — cannot safely remove without inventing verbs; skipping autofix")
+		return nil, nil
 	}
 
 	// DEFENSE NOTE: RBAC-001 is a surgical edit of an existing role, so Update is clearer than SSA

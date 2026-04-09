@@ -58,6 +58,7 @@ type ZeroTrustPolicyReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=list;watch;get
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=list;watch;get
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=list;watch;get
+// +kubebuilder:rbac:groups="",resources=pods,verbs=list;watch;get
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;create;update;patch
 
@@ -152,9 +153,12 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 			if remAuditEntry != nil {
 				pendingAuditEntries = append(pendingAuditEntries, *remAuditEntry)
+				// DEFENSE NOTE: autoFixedCount is only incremented when applyRemediation confirms
+				// an actual API write occurred (non-nil entry). No-op returns (nil, nil) — e.g.
+				// namespace already gone, role already clean — do not consume rate limit budget
+				// or inflate remediation metrics.
+				autoFixedCount++
 			}
-			RecordRemediation(event.ViolationType, event.Namespace)
-			autoFixedCount++
 		case DecisionActionEscalate:
 			escalatedCount++
 			pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
@@ -225,6 +229,13 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	for _, entry := range pendingAuditEntries {
 		if entry.Action == "ESCALATED" {
 			RecordEscalation(entry.ViolationType, entry.Namespace)
+		}
+		// DEFENSE NOTE: RecordRemediation is called here — after AppendAuditEntries
+		// succeeds — mirroring the escalation pattern. If the audit write fails and
+		// the reconciler retries, the counter is never incremented for that cycle,
+		// keeping Prometheus metrics consistent with the persisted audit log.
+		if entry.Action == "AUTO_REMEDIATED" {
+			RecordRemediation(entry.ViolationType, entry.Namespace)
 		}
 	}
 

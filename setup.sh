@@ -21,8 +21,14 @@ kubectl create namespace test-low-risk --dry-run=client -o yaml | kubectl apply 
 kubectl create namespace test-high-risk --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace test-exempt --dry-run=client -o yaml | kubectl apply -f -
 
-echo "==> Resetting audit log ConfigMap (prevents 1MB overflow across sessions)..."
+echo "==> Resetting audit log ConfigMaps (prevents accumulation across sessions)..."
+# Delete the base ConfigMap and ALL numbered rotation ConfigMaps (ztk8s-audit-log-2, -3, etc.)
+# The controller creates these automatically; stale ones from prior sessions cause
+# currentAuditConfigMapName() to resume writing to an old object instead of starting fresh.
 kubectl delete configmap ztk8s-audit-log -n zerotrust-system --ignore-not-found
+for i in $(seq 2 20); do
+  kubectl delete configmap "ztk8s-audit-log-${i}" -n zerotrust-system --ignore-not-found 2>/dev/null || true
+done
 
 echo "==> Installing CRDs..."
 make install

@@ -107,8 +107,10 @@ spec:
                     type: string
                   rateLimit:
                     default: 5
-                    description: RateLimit is the maximum number of remediations applied
-                      per minute (e.g. 5).
+                    description: |-
+                      RateLimit is the maximum number of remediations applied per reconcile cycle
+                      (default interval: 30 seconds). For example, 5 means at most 5 auto-remediations
+                      per 30-second cycle; excess violations are escalated for human review.
                     format: int32
                     minimum: 1
                     type: integer

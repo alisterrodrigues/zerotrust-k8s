@@ -44,6 +44,16 @@ func (r *ZeroTrustPolicyReconciler) runDetections(ctx context.Context, policy *z
 			}
 			events = append(events, wildcardEvents...)
 		}
+		// RBAC-004 / RBAC-005: namespaced Role wildcard detection.
+		// Uses same DenyWildcardVerbs flag as RBAC-001/002 — both cluster and namespaced
+		// roles are audited when the operator enables wildcard detection.
+		if boolPtrVal(policy.Spec.RBAC.DenyWildcardVerbs, false) {
+			namespacedEvents, err := r.detectWildcardNamespacedRoles(ctx)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, namespacedEvents...)
+		}
 		cfg := policy.Spec.RBAC.DenyClusterAdminBinding
 		if cfg != nil {
 			bindingEvents, err := r.detectClusterAdminBindings(ctx, cfg.ExcludeServiceAccounts)
@@ -54,12 +64,21 @@ func (r *ZeroTrustPolicyReconciler) runDetections(ctx context.Context, policy *z
 		}
 	}
 
-	if policy.Spec.NetworkPolicy != nil && boolPtrVal(policy.Spec.NetworkPolicy.RequireDefaultDenyIngress, false) {
-		networkEvents, err := r.detectNamespacesWithoutNetworkPolicy(ctx, policy)
-		if err != nil {
-			return nil, err
+	if policy.Spec.NetworkPolicy != nil {
+		if boolPtrVal(policy.Spec.NetworkPolicy.RequireDefaultDenyIngress, false) {
+			networkEvents, err := r.detectNamespacesWithoutNetworkPolicy(ctx, policy)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, networkEvents...)
 		}
-		events = append(events, networkEvents...)
+		if boolPtrVal(policy.Spec.NetworkPolicy.RequireDefaultDenyEgress, false) {
+			egressEvents, err := r.detectNamespacesWithoutEgressPolicy(ctx, policy)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, egressEvents...)
+		}
 	}
 
 	return events, nil
@@ -119,6 +138,79 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Conte
 
 func clusterRoleWildcardFlags(cr *rbacv1.ClusterRole) (hasWildcardVerb, hasWildcardResource bool) {
 	for _, rule := range cr.Rules {
+		if stringSliceContains(rule.Verbs, rbacv1.VerbAll) {
+			hasWildcardVerb = true
+		}
+		if stringSliceContains(rule.Resources, rbacv1.ResourceAll) {
+			hasWildcardResource = true
+		}
+	}
+	return hasWildcardVerb, hasWildcardResource
+}
+
+// detectWildcardNamespacedRoles implements RBAC-004 (wildcard verbs) and RBAC-005
+// (wildcard resources) on namespaced Role objects across all namespaces.
+//
+// DEFENSE NOTE: RBAC-001/002 only cover ClusterRoles. A developer can bypass
+// cluster-level detection entirely by creating a namespaced Role with wildcard
+// verbs in their own namespace. RBAC-004/005 close this gap by scanning every
+// Role in every namespace using the same wildcard logic applied to ClusterRoles.
+func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Context) ([]ViolationEvent, error) {
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList); err != nil {
+		return nil, err
+	}
+
+	events := make([]ViolationEvent, 0)
+	for i := range nsList.Items {
+		nsName := nsList.Items[i].Name
+		var roleList rbacv1.RoleList
+		if err := r.List(ctx, &roleList, client.InNamespace(nsName)); err != nil {
+			return nil, err
+		}
+		for j := range roleList.Items {
+			role := &roleList.Items[j]
+			hasWildcardVerb, hasWildcardResource := namespacedRoleWildcardFlags(role)
+
+			if hasWildcardVerb {
+				// RBAC-004: namespaced Role with wildcard verbs — always HIGH per remediation model.
+				logViolation("RBAC-004", role.Name, nsName, "HIGH")
+				event, err := newViolationEvent(
+					"RBAC-004",
+					role.Name,
+					nsName,
+					"HIGH",
+					role,
+					"Remove wildcard verbs from namespaced Role and replace with explicit least-privilege verbs.",
+				)
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, event)
+			}
+			if hasWildcardResource {
+				// RBAC-005: namespaced Role with wildcard resources — always HIGH per remediation model.
+				logViolation("RBAC-005", role.Name, nsName, "HIGH")
+				event, err := newViolationEvent(
+					"RBAC-005",
+					role.Name,
+					nsName,
+					"HIGH",
+					role,
+					"Remove wildcard resources from namespaced Role and scope access to explicit resources only.",
+				)
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, event)
+			}
+		}
+	}
+	return events, nil
+}
+
+func namespacedRoleWildcardFlags(role *rbacv1.Role) (hasWildcardVerb, hasWildcardResource bool) {
+	for _, rule := range role.Rules {
 		if stringSliceContains(rule.Verbs, rbacv1.VerbAll) {
 			hasWildcardVerb = true
 		}
@@ -374,6 +466,98 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		}
 	}
 	return events, nil
+}
+
+// detectNamespacesWithoutEgressPolicy implements NP-002: namespaces lacking a
+// default-deny egress NetworkPolicy when requireDefaultDenyEgress is enabled.
+//
+// DEFENSE NOTE: Default-deny egress is the egress counterpart to NP-001.
+// Without it, any compromised pod can freely exfiltrate data to external services.
+// NP-002 is detection-only (no autofix) because the safe egress rules for a
+// namespace depend on its workload — the operator must define them explicitly.
+func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutEgressPolicy(ctx context.Context, policy *zerotrustv1alpha1.ZeroTrustPolicy) ([]ViolationEvent, error) {
+	exempt := exemptionSet(policy.Spec.NetworkPolicy.ExemptNamespaces)
+
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList); err != nil {
+		return nil, err
+	}
+
+	events := make([]ViolationEvent, 0)
+	for i := range nsList.Items {
+		ns := &nsList.Items[i]
+		if ns.Status.Phase != corev1.NamespaceActive {
+			continue
+		}
+		if _, skip := exempt[ns.Name]; skip {
+			continue
+		}
+
+		var npList netv1.NetworkPolicyList
+		if err := r.List(ctx, &npList, client.InNamespace(ns.Name)); err != nil {
+			return nil, err
+		}
+		if !hasDefaultDenyEgress(npList.Items) {
+			risk := np002Risk(ns.Name)
+			logViolation("NP-002", ns.Name, ns.Name, risk)
+			event, err := newViolationEvent(
+				"NP-002",
+				ns.Name,
+				ns.Name,
+				risk,
+				ns,
+				"Apply a default-deny egress NetworkPolicy in this namespace unless explicitly exempted.",
+			)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+// hasDefaultDenyEgress returns true if policies contains a default-deny egress policy.
+// Criteria mirror hasDefaultDenyIngress but check Egress instead of Ingress.
+func hasDefaultDenyEgress(policies []netv1.NetworkPolicy) bool {
+	for _, pol := range policies {
+		// Criterion 1: podSelector must be empty — selects all pods.
+		if len(pol.Spec.PodSelector.MatchLabels) != 0 || len(pol.Spec.PodSelector.MatchExpressions) != 0 {
+			continue
+		}
+		// Criterion 2: policyTypes must include Egress (explicit) or both Ingress+Egress
+		// must be absent (implicit full isolation). An empty policyTypes with no egress
+		// rules defaults to ingress-only isolation per Kubernetes docs, so we require
+		// explicit Egress here.
+		hasEgressType := false
+		for _, pt := range pol.Spec.PolicyTypes {
+			if pt == netv1.PolicyTypeEgress {
+				hasEgressType = true
+				break
+			}
+		}
+		if !hasEgressType {
+			continue
+		}
+		// Criterion 3: egress rules must be absent or empty — zero allowed egress traffic.
+		if len(pol.Spec.Egress) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// np002Risk follows the same pattern as np001Risk: kube-system = CRITICAL, others = HIGH.
+// NP-002 is detection-only; no autofix path exists. Risk drives escalation logging only.
+//
+// DEFENSE NOTE: NP-002 is always HIGH for standard namespaces (not LOW like NP-001)
+// because unrestricted egress allows data exfiltration regardless of whether any pods
+// are currently running — the risk is the policy gap, not the current workload state.
+func np002Risk(namespace string) string {
+	if namespace == metav1NamespaceKubeSystem {
+		return "CRITICAL"
+	}
+	return "HIGH"
 }
 
 // hasDefaultDenyIngress returns true if policies contains at least one NetworkPolicy that

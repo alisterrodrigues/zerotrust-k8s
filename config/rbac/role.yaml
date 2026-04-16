@@ -18,6 +18,7 @@ rules:
   - ""
   resources:
   - namespaces
+  - pods
   verbs:
   - get
   - list
@@ -38,6 +39,7 @@ rules:
   resources:
   - clusterrolebindings
   - rolebindings
+  - roles
   verbs:
   - get
   - list

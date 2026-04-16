@@ -22,11 +22,17 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	zerotrustv1alpha1 "github.com/capstone/zerotrust-k8s/api/v1alpha1"
 )
@@ -57,6 +63,7 @@ type ZeroTrustPolicyReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=list;watch;get
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=list;watch;get
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=list;watch;get
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=list;watch;get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=list;watch;get
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch
@@ -263,8 +270,28 @@ func (r *ZeroTrustPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.seenViolations == nil {
 		r.seenViolations = make(map[ViolationKey]time.Time)
 	}
+
+	// enqueueBaseline always returns a reconcile request for the singleton baseline CR.
+	// DEFENSE NOTE: By mapping every watched resource change back to "cluster-baseline",
+	// the controller re-runs the full detection pass immediately whenever a ClusterRole,
+	// ClusterRoleBinding, RoleBinding, NetworkPolicy, or Namespace is created, updated,
+	// or deleted. This reduces worst-case detection latency from 30s to near-zero for
+	// event-driven changes, while the RequeueAfter loop still catches anything missed.
+	enqueueBaseline := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{Name: clusterBaselineName}},
+			}
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&zerotrustv1alpha1.ZeroTrustPolicy{}).
+		Watches(&rbacv1.ClusterRole{}, enqueueBaseline).
+		Watches(&rbacv1.ClusterRoleBinding{}, enqueueBaseline).
+		Watches(&rbacv1.RoleBinding{}, enqueueBaseline).
+		Watches(&netv1.NetworkPolicy{}, enqueueBaseline).
+		Watches(&corev1.Namespace{}, enqueueBaseline).
 		Named("zerotrustpolicy").
 		Complete(r)
 }

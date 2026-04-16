@@ -244,5 +244,5 @@ func removeWildcardVerb(verbs []string) []string {
 func remediationAuditEntryID(violationType, resourceName string) string {
 	normalized := strings.ReplaceAll(resourceName, "/", "-")
 	normalized = strings.ReplaceAll(normalized, " ", "-")
-	return fmt.Sprintf("aud-%s-%s-%s", time.Now().UTC().Format("20060102150405"), violationType, normalized)
+	return fmt.Sprintf("aud-%s-%s-%s", time.Now().UTC().Format("20060102150405.000000000"), violationType, normalized)
 }

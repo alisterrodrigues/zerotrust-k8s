@@ -164,52 +164,49 @@ func clusterRoleWildcardFlags(cr *rbacv1.ClusterRole) (hasWildcardVerb, hasWildc
 // verbs in their own namespace. RBAC-004/005 close this gap by scanning every
 // Role in every namespace using the same wildcard logic applied to ClusterRoles.
 func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Context, rbacSpec *zerotrustv1alpha1.RBACSpec) ([]ViolationEvent, error) {
-	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList); err != nil {
+	// DEFENSE NOTE: A single cluster-wide List is O(1) API calls regardless of namespace
+	// count. The informer cache makes this call local (no network round-trip). This replaces
+	// the previous O(N namespaces) loop that issued one API call per namespace.
+	var roleList rbacv1.RoleList
+	if err := r.List(ctx, &roleList); err != nil {
 		return nil, err
 	}
 
 	events := make([]ViolationEvent, 0)
-	for i := range nsList.Items {
-		nsName := nsList.Items[i].Name
-		var roleList rbacv1.RoleList
-		if err := r.List(ctx, &roleList, client.InNamespace(nsName)); err != nil {
-			return nil, err
-		}
-		for j := range roleList.Items {
-			role := &roleList.Items[j]
-			hasWildcardVerb, hasWildcardResource := namespacedRoleWildcardFlags(role)
+	for j := range roleList.Items {
+		role := &roleList.Items[j]
+		nsName := role.Namespace
+		hasWildcardVerb, hasWildcardResource := namespacedRoleWildcardFlags(role)
 
-			if hasWildcardVerb && boolPtrVal(rbacSpec.DenyWildcardVerbs, false) {
-				logViolation("RBAC-004", role.Name, nsName, "HIGH")
-				event, err := newViolationEvent(
-					"RBAC-004",
-					role.Name,
-					nsName,
-					"HIGH",
-					role,
-					"Remove wildcard verbs from namespaced Role and replace with explicit least-privilege verbs.",
-				)
-				if err != nil {
-					return nil, err
-				}
-				events = append(events, event)
+		if hasWildcardVerb && boolPtrVal(rbacSpec.DenyWildcardVerbs, false) {
+			logViolation("RBAC-004", role.Name, nsName, "HIGH")
+			event, err := newViolationEvent(
+				"RBAC-004",
+				role.Name,
+				nsName,
+				"HIGH",
+				role,
+				"Remove wildcard verbs from namespaced Role and replace with explicit least-privilege verbs.",
+			)
+			if err != nil {
+				return nil, err
 			}
-			if hasWildcardResource && boolPtrVal(rbacSpec.DenyWildcardResources, false) {
-				logViolation("RBAC-005", role.Name, nsName, "HIGH")
-				event, err := newViolationEvent(
-					"RBAC-005",
-					role.Name,
-					nsName,
-					"HIGH",
-					role,
-					"Remove wildcard resources from namespaced Role and scope access to explicit resources only.",
-				)
-				if err != nil {
-					return nil, err
-				}
-				events = append(events, event)
+			events = append(events, event)
+		}
+		if hasWildcardResource && boolPtrVal(rbacSpec.DenyWildcardResources, false) {
+			logViolation("RBAC-005", role.Name, nsName, "HIGH")
+			event, err := newViolationEvent(
+				"RBAC-005",
+				role.Name,
+				nsName,
+				"HIGH",
+				role,
+				"Remove wildcard resources from namespaced Role and scope access to explicit resources only.",
+			)
+			if err != nil {
+				return nil, err
 			}
+			events = append(events, event)
 		}
 	}
 	return events, nil
@@ -311,6 +308,11 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 			if err != nil {
 				return nil, err
 			}
+			// DEFENSE NOTE: Populate SubjectName/SubjectKind so each offending subject
+			// gets its own deduplication key. Without this, a binding with 3 bad subjects
+			// would only track 1 violation after the first cycle.
+			event.SubjectName = sub.Name
+			event.SubjectKind = sub.Kind
 			events = append(events, event)
 		}
 	}
@@ -318,40 +320,37 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 	// This is uncommon but valid Kubernetes and grants cluster-admin permissions scoped
 	// to the namespace of the binding. Without checking namespaced RoleBindings, an
 	// attacker who creates such a binding is completely invisible to RBAC-003 detection.
-	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList); err != nil {
+	// DEFENSE NOTE: Single cluster-wide RoleBindingList — O(1) API calls.
+	// Mirrors the fix applied to clusterRoleHasBindings in the previous audit round.
+	var allRBList rbacv1.RoleBindingList
+	if err := r.List(ctx, &allRBList); err != nil {
 		return nil, err
 	}
-	for i := range nsList.Items {
-		nsName := nsList.Items[i].Name
-		var rbList rbacv1.RoleBindingList
-		if err := r.List(ctx, &rbList, client.InNamespace(nsName)); err != nil {
-			return nil, err
+	for j := range allRBList.Items {
+		rb := &allRBList.Items[j]
+		if !roleRefPointsToClusterRole(rb.RoleRef, clusterAdminClusterRole) {
+			continue
 		}
-		for j := range rbList.Items {
-			rb := &rbList.Items[j]
-			if !roleRefPointsToClusterRole(rb.RoleRef, clusterAdminClusterRole) {
+		for _, sub := range rb.Subjects {
+			if subjectMatchesExclusion(sub, excludePatterns) {
 				continue
 			}
-			for _, sub := range rb.Subjects {
-				if subjectMatchesExclusion(sub, excludePatterns) {
-					continue
-				}
-				risk := rbac003Risk(sub)
-				logViolation("RBAC-003", rb.Name, nsName, risk)
-				event, err := newViolationEvent(
-					"RBAC-003",
-					rb.Name,
-					nsName,
-					risk,
-					rb,
-					"Review non-whitelisted cluster-admin RoleBinding and revoke or scope it.",
-				)
-				if err != nil {
-					return nil, err
-				}
-				events = append(events, event)
+			risk := rbac003Risk(sub)
+			logViolation("RBAC-003", rb.Name, rb.Namespace, risk)
+			event, err := newViolationEvent(
+				"RBAC-003",
+				rb.Name,
+				rb.Namespace,
+				risk,
+				rb,
+				"Review non-whitelisted cluster-admin RoleBinding and revoke or scope it.",
+			)
+			if err != nil {
+				return nil, err
 			}
+			event.SubjectName = sub.Name
+			event.SubjectKind = sub.Kind
+			events = append(events, event)
 		}
 	}
 

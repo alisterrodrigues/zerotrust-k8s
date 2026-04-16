@@ -88,6 +88,13 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Read the operator's own namespace from the downward API env var.
+	// This ensures the audit log is written to the same namespace the controller
+	// runs in, regardless of deployment model.
+	if ns := os.Getenv("NAMESPACE"); ns != "" {
+		controller.SetAuditNamespace(ns)
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

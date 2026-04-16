@@ -133,6 +133,39 @@ func decisionFromMatrix(event ViolationEvent) RemediationDecision {
 			Reason:          "RBAC-003 any risk: always escalate per matrix",
 			SuggestedAction: "Revoke or strictly scope non-whitelisted cluster-admin bindings.",
 		}
+	case "RBAC-004":
+		return RemediationDecision{
+			Action:          DecisionActionEscalate,
+			Reason:          "RBAC-004 HIGH: namespaced Role has wildcard verbs — escalate for human review",
+			SuggestedAction: "Remove wildcard verbs from namespaced Role and replace with explicit least-privilege verbs.",
+		}
+	case "RBAC-005":
+		return RemediationDecision{
+			Action:          DecisionActionEscalate,
+			Reason:          "RBAC-005 HIGH: namespaced Role has wildcard resources — escalate for human review",
+			SuggestedAction: "Remove wildcard resources from namespaced Role and scope access to explicit resources only.",
+		}
+	case "RBAC-006":
+		return RemediationDecision{
+			Action:          DecisionActionEscalate,
+			Reason:          "RBAC-006 LOW: non-system ClusterRoleBinding is candidate for namespace-scoping — escalate for review",
+			SuggestedAction: "Consider replacing this ClusterRoleBinding with a namespaced Role and RoleBinding.",
+		}
+	case "NP-002":
+		switch event.RiskLevel {
+		case "CRITICAL":
+			return RemediationDecision{
+				Action:          DecisionActionEscalate,
+				Reason:          "NP-002 CRITICAL: kube-system namespace missing default-deny egress — alert immediately",
+				SuggestedAction: "Apply a default-deny egress NetworkPolicy in kube-system with explicit allow-rules.",
+			}
+		default:
+			return RemediationDecision{
+				Action:          DecisionActionEscalate,
+				Reason:          "NP-002 HIGH: namespace missing default-deny egress — escalate for human review",
+				SuggestedAction: "Apply a default-deny egress NetworkPolicy with explicit allow-rules for required egress traffic.",
+			}
+		}
 	}
 
 	return RemediationDecision{

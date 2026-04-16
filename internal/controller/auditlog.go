@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,11 +31,28 @@ import (
 )
 
 const (
-	auditLogConfigMapName      = "ztk8s-audit-log"
-	auditLogConfigMapNamespace = "zerotrust-system"
-	auditLogBaseKey            = "audit.log"
-	auditLogMaxDataBytes       = 900 * 1024
+	auditLogConfigMapName  = "ztk8s-audit-log"
+	auditLogBaseKey        = "audit.log"
+	auditLogMaxDataBytes   = 900 * 1024
+	auditLogMaxObjectBytes = 850 * 1024
+	defaultAuditNamespace  = "zerotrust-system"
 )
+
+// auditLogConfigMapNamespace is the namespace for the audit log ConfigMap.
+// It is set at startup by SetAuditNamespace() from the NAMESPACE env var,
+// falling back to defaultAuditNamespace if the env var is absent.
+// DEFENSE NOTE: Reading namespace from the Pod's own metadata at runtime
+// (via the downward API env var) ensures the audit log is written to the
+// correct namespace in any deployment model, not just the local make run path.
+var auditLogConfigMapNamespace = defaultAuditNamespace
+
+// SetAuditNamespace configures the namespace for the audit log ConfigMap.
+// Call this from main() before starting the manager.
+func SetAuditNamespace(ns string) {
+	if ns != "" {
+		auditLogConfigMapNamespace = ns
+	}
+}
 
 // AuditEntry is a single append-only audit record for remediation/escalation handling.
 type AuditEntry struct {
@@ -52,15 +68,81 @@ type AuditEntry struct {
 	Timestamp              time.Time
 }
 
-// AppendAuditEntry appends one JSON line into ztk8s-audit-log ConfigMap without overwriting existing lines.
+// currentAuditConfigMapName returns the name of the active audit ConfigMap.
+// It lists all ztk8s-audit-log* ConfigMaps in the audit namespace and returns
+// the one with the highest numeric suffix whose data size is below the object limit.
+// If none exists, it returns the base name for creation.
+//
+// DEFENSE NOTE: By rotating to new ConfigMap OBJECTS (not new keys within the same object),
+// we stay safely below Kubernetes's 1 MiB per-object limit regardless of audit volume.
+func currentAuditConfigMapName(ctx context.Context, k8sClient client.Client) (string, error) {
+	var cmList corev1.ConfigMapList
+	if err := k8sClient.List(ctx, &cmList,
+		client.InNamespace(auditLogConfigMapNamespace)); err != nil {
+		return auditLogConfigMapName, err
+	}
+
+	// Find all audit log ConfigMaps and sort by index.
+	highest := 0
+	highestSize := 0
+	for _, cm := range cmList.Items {
+		if cm.Name == auditLogConfigMapName {
+			size := 0
+			for _, v := range cm.Data {
+				size += len(v)
+			}
+			if highest == 0 {
+				highest = 1
+				highestSize = size
+			}
+		} else if strings.HasPrefix(cm.Name, auditLogConfigMapName+"-") {
+			suffix := strings.TrimPrefix(cm.Name, auditLogConfigMapName+"-")
+			n, err := strconv.Atoi(suffix)
+			if err != nil {
+				continue
+			}
+			if n > highest {
+				size := 0
+				for _, v := range cm.Data {
+					size += len(v)
+				}
+				highest = n
+				highestSize = size
+			}
+		}
+	}
+
+	if highest == 0 {
+		return auditLogConfigMapName, nil
+	}
+	if highestSize >= auditLogMaxObjectBytes {
+		// Current object is full — return name for next object.
+		if highest == 1 {
+			return auditLogConfigMapName + "-2", nil
+		}
+		return fmt.Sprintf("%s-%d", auditLogConfigMapName, highest+1), nil
+	}
+	if highest == 1 {
+		return auditLogConfigMapName, nil
+	}
+	return fmt.Sprintf("%s-%d", auditLogConfigMapName, highest), nil
+}
+
+// AppendAuditEntry appends one JSON line into the active audit ConfigMap without overwriting existing lines.
 func AppendAuditEntry(ctx context.Context, k8sClient client.Client, entry AuditEntry) error {
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
 	line := string(encoded) + "\n"
+
+	targetName, err := currentAuditConfigMapName(ctx, k8sClient)
+	if err != nil {
+		// Fall back to base name on list error — better to attempt write than lose entry.
+		targetName = auditLogConfigMapName
+	}
 	key := client.ObjectKey{
-		Name:      auditLogConfigMapName,
+		Name:      targetName,
 		Namespace: auditLogConfigMapNamespace,
 	}
 
@@ -73,7 +155,7 @@ func AppendAuditEntry(ctx context.Context, k8sClient client.Client, entry AuditE
 		// required before first remediation cycle writes an audit record.
 		cm = corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      auditLogConfigMapName,
+				Name:      targetName,
 				Namespace: auditLogConfigMapNamespace,
 			},
 			Data: map[string]string{
@@ -87,8 +169,7 @@ func AppendAuditEntry(ctx context.Context, k8sClient client.Client, entry AuditE
 		cm.Data = map[string]string{}
 	}
 
-	targetKey := nextAuditKey(cm.Data, len(line))
-	cm.Data[targetKey] = cm.Data[targetKey] + line
+	cm.Data[auditLogBaseKey] = cm.Data[auditLogBaseKey] + line
 	return k8sClient.Update(ctx, &cm)
 }
 
@@ -119,8 +200,13 @@ func AppendAuditEntries(ctx context.Context, k8sClient client.Client, entries []
 		lines = append(lines, string(encoded)+"\n")
 	}
 
+	targetName, err := currentAuditConfigMapName(ctx, k8sClient)
+	if err != nil {
+		// Fall back to base name on list error — better to attempt write than lose entry.
+		targetName = auditLogConfigMapName
+	}
 	key := client.ObjectKey{
-		Name:      auditLogConfigMapName,
+		Name:      targetName,
 		Namespace: auditLogConfigMapNamespace,
 	}
 
@@ -133,7 +219,7 @@ func AppendAuditEntries(ctx context.Context, k8sClient client.Client, entries []
 		combined := strings.Join(lines, "")
 		cm = corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      auditLogConfigMapName,
+				Name:      targetName,
 				Namespace: auditLogConfigMapNamespace,
 			},
 			Data: map[string]string{
@@ -147,57 +233,9 @@ func AppendAuditEntries(ctx context.Context, k8sClient client.Client, entries []
 		cm.Data = map[string]string{}
 	}
 
-	// Append each line, respecting the 900KB per-key limit with rollover.
 	for _, line := range lines {
-		targetKey := nextAuditKey(cm.Data, len(line))
-		cm.Data[targetKey] = cm.Data[targetKey] + line
+		cm.Data[auditLogBaseKey] = cm.Data[auditLogBaseKey] + line
 	}
 
 	return k8sClient.Update(ctx, &cm)
-}
-
-func nextAuditKey(data map[string]string, newLineBytes int) string {
-	if len(data) == 0 {
-		return auditLogBaseKey
-	}
-
-	indices := make([]int, 0)
-	for key := range data {
-		idx, ok := parseAuditKeyIndex(key)
-		if ok {
-			indices = append(indices, idx)
-		}
-	}
-	if len(indices) == 0 {
-		return auditLogBaseKey
-	}
-	sort.Ints(indices)
-	last := indices[len(indices)-1]
-	lastKey := auditKeyForIndex(last)
-	if len(data[lastKey])+newLineBytes <= auditLogMaxDataBytes {
-		return lastKey
-	}
-	return auditKeyForIndex(last + 1)
-}
-
-func parseAuditKeyIndex(key string) (int, bool) {
-	if key == auditLogBaseKey {
-		return 1, true
-	}
-	if !strings.HasPrefix(key, auditLogBaseKey+".") {
-		return 0, false
-	}
-	raw := strings.TrimPrefix(key, auditLogBaseKey+".")
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 2 {
-		return 0, false
-	}
-	return n, true
-}
-
-func auditKeyForIndex(index int) string {
-	if index <= 1 {
-		return auditLogBaseKey
-	}
-	return fmt.Sprintf("%s.%d", auditLogBaseKey, index)
 }

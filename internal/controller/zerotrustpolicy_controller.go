@@ -120,7 +120,6 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		vk := violationKeyFromEvent(event)
 		if _, seen := r.seenViolations[vk]; !seen {
 			newEvents = append(newEvents, event)
-			r.seenViolations[vk] = time.Now().UTC()
 		} else {
 			knownEvents = append(knownEvents, event)
 		}
@@ -152,16 +151,29 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	for _, event := range newEvents {
 		decision := Decide(event, policy.Spec)
-		if !r.windowRateLimit(rateLimit) {
-			decision = RemediationDecision{
-				Action:          DecisionActionEscalate,
-				Reason:          "rate limit exceeded",
-				SuggestedAction: event.SuggestedRemediation,
-			}
-		}
 
 		switch decision.Action {
 		case DecisionActionAutoFix:
+			// DEFENSE NOTE: windowRateLimit is checked here — inside the AUTO_FIX branch only —
+			// so that only actual remediation writes consume the 30-second budget. ESCALATE,
+			// SKIP, and DRY_RUN decisions do not count against the rate limit. This ensures
+			// HIGH-risk escalations cannot starve LOW-risk auto-fixes of their budget.
+			if !r.windowRateLimit(rateLimit) {
+				pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
+					EntryID:                buildAuditEntryID(event),
+					ViolationType:          event.ViolationType,
+					RiskLevel:              event.RiskLevel,
+					ResourceName:           event.ResourceName,
+					Namespace:              event.Namespace,
+					Action:                 "ESCALATED",
+					Reason:                 "rate limit exceeded for 30-second window",
+					PreRemediationSnapshot: event.ResourceSnapshot,
+					SuggestedAction:        event.SuggestedRemediation,
+					Timestamp:              time.Now().UTC(),
+				})
+				escalatedCount++
+				break
+			}
 			// DEFENSE NOTE: By returning the AuditEntry from the autofix functions instead of
 			// writing it inline, all audit writes for a cycle flow through the single
 			// AppendAuditEntries batch call below. This guarantees at most one ConfigMap write
@@ -240,6 +252,16 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// DEFENSE NOTE: seenViolations is updated only after AppendAuditEntries succeeds.
+	// If the audit write fails and the reconciler retries, the violations are still
+	// treated as newEvents on the next cycle and will be re-processed and re-written.
+	// This guarantees eventual audit trail consistency at the cost of a potential
+	// duplicate entry on crash-restart — the correct trade-off for a forensic audit log.
+	for _, event := range newEvents {
+		vk := violationKeyFromEvent(event)
+		r.seenViolations[vk] = time.Now().UTC()
+	}
+
 	// DEFENSE NOTE: Recording escalation metrics only after the audit write succeeds prevents
 	// double-counting on retry. If AppendAuditEntries fails and the reconciler returns an error,
 	// controller-runtime requeues the entire cycle. Moving RecordEscalation here means metrics
@@ -255,6 +277,16 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// keeping Prometheus metrics consistent with the persisted audit log.
 		if entry.Action == "AUTO_REMEDIATED" {
 			RecordRemediation(entry.ViolationType, entry.Namespace)
+		}
+		// DEFENSE NOTE: DRY_RUN and SKIPPED metrics give operators visibility into
+		// system activity when running in dryrun or manual mode. Without these,
+		// all Prometheus counters stay at zero in non-auto modes, making it impossible
+		// to confirm the detection pipeline is working during staged rollout.
+		if entry.Action == "DRY_RUN" {
+			RecordDryRun(entry.ViolationType, entry.Namespace)
+		}
+		if entry.Action == "SKIPPED" {
+			RecordSkipped(entry.ViolationType, entry.Namespace)
 		}
 	}
 
@@ -345,6 +377,16 @@ func (r *ZeroTrustPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&rbacv1.RoleBinding{}, enqueueBaseline).
 		Watches(&netv1.NetworkPolicy{}, enqueueBaseline).
 		Watches(&corev1.Namespace{}, enqueueBaseline).
+		// DEFENSE NOTE: Role watch ensures RBAC-004 and RBAC-005 violations (wildcard verbs/resources
+		// in namespaced Roles) are detected event-driven — immediately when a Role is created or
+		// modified — rather than waiting up to 30 seconds for the next periodic tick.
+		Watches(&rbacv1.Role{}, enqueueBaseline).
+		// DEFENSE NOTE: Pod watch ensures that NP-001 risk transitions are detected
+		// event-driven. When a pod is created in a previously-empty namespace, the risk
+		// transitions from LOW (auto-remediable) to HIGH (escalate). Without this watch,
+		// the transition is only detected at the next 30-second periodic tick, potentially
+		// allowing the auto-remediation of a namespace that now has running workloads.
+		Watches(&corev1.Pod{}, enqueueBaseline).
 		Named("zerotrustpolicy").
 		Complete(r)
 }
@@ -354,6 +396,8 @@ func violationKeyFromEvent(e ViolationEvent) ViolationKey {
 		ViolationType: e.ViolationType,
 		ResourceName:  e.ResourceName,
 		Namespace:     e.Namespace,
+		SubjectName:   e.SubjectName,
+		SubjectKind:   e.SubjectKind,
 	}
 }
 

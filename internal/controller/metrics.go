@@ -58,6 +58,27 @@ var (
 		[]string{"violation_type", "namespace"},
 	)
 
+	// ztk8sDryRunTotal counts violations processed in DRY_RUN_LOG mode (no write performed).
+	// DEFENSE NOTE: This counter lets operators confirm the system is actively finding
+	// violations when running in dryrun mode — without it, ztk8s_remediations_total stays
+	// at zero and operators cannot distinguish "no violations" from "violations suppressed."
+	ztk8sDryRunTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ztk8s_dryrun_total",
+			Help: "Total number of violations that would have been auto-remediated in dryrun mode",
+		},
+		[]string{"violation_type", "namespace"},
+	)
+
+	// ztk8sSkippedTotal counts violations skipped (e.g. kube-system CRITICAL NP-001).
+	ztk8sSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ztk8s_skipped_total",
+			Help: "Total number of violations skipped by the decision engine",
+		},
+		[]string{"violation_type", "namespace"},
+	)
+
 	// ztk8sCycleDurationSeconds observes full Reconcile() wall time per invocation.
 	// DEFENSE NOTE: Maps to evaluation-plan “Performance overhead” and reconcile SLO checks — bucketed
 	// latency shows whether audit+decision stays within expected bounds (e.g. ~30s tick vs slow API).
@@ -75,6 +96,8 @@ func init() {
 		ztk8sViolationsTotal,
 		ztk8sRemediationsTotal,
 		ztk8sEscalationsTotal,
+		ztk8sDryRunTotal,
+		ztk8sSkippedTotal,
 		ztk8sCycleDurationSeconds,
 	)
 }
@@ -97,4 +120,14 @@ func RecordEscalation(violationType, namespace string) {
 // RecordCycleDuration observes reconcile duration in seconds.
 func RecordCycleDuration(durationSeconds float64) {
 	ztk8sCycleDurationSeconds.Observe(durationSeconds)
+}
+
+// RecordDryRun increments the dry-run counter after a DRY_RUN_LOG decision.
+func RecordDryRun(violationType, namespace string) {
+	ztk8sDryRunTotal.WithLabelValues(violationType, namespace).Inc()
+}
+
+// RecordSkipped increments the skipped counter after a SKIP decision.
+func RecordSkipped(violationType, namespace string) {
+	ztk8sSkippedTotal.WithLabelValues(violationType, namespace).Inc()
 }

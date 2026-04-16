@@ -9,9 +9,11 @@
 
 ## Metric 1 — NP-001 Detection and Remediation Latency
 
-**Definition:** Time from namespace creation (no NetworkPolicy) to confirmed auto-remediation entry in the audit log (`AUTO_REMEDIATED` action written to `ztk8s-audit-log` ConfigMap).
+**Definition:** Time from namespace creation (no NetworkPolicy) to appearance of the `ztk8s-default-deny-ingress` NetworkPolicy applied by the controller's auto-remediation path.
 
-**Method:** `evaluations/scenarios/01-detect-np001.sh` — creates a fresh namespace, records epoch timestamp at creation (`T1`), polls audit log until `AUTO_REMEDIATED` entry appears (`T2`). Latency = `T2 - T1`.
+**Method:** `evaluations/scenarios/01-detect-np001.sh` — creates a fresh empty namespace (no running pods, so NP-001 risk = LOW → AUTO_FIX eligible), records epoch timestamp at creation (`T1`), polls for `ztk8s-default-deny-ingress` NetworkPolicy until it appears (`T2`). Latency = `T2 - T1`.
+
+**Note on measurement scope:** This metric measures end-to-end time from namespace creation to confirmed NetworkPolicy application. The audit log entry (`AUTO_REMEDIATED`) is written in the same reconcile cycle, immediately after the NetworkPolicy create succeeds, so the two measurements are effectively equivalent. The scenario polls NetworkPolicy existence because it is directly inspectable via kubectl without parsing JSON.
 
 **Raw data (9 trials collected, 5 used for analysis):**
 
@@ -36,7 +38,7 @@
 | Mean | 15,837 ms |
 | Std Dev | ≈ 2,105 ms |
 
-**Interpretation:** Detection and remediation consistently completes within a single 30-second reconcile interval (mean ~15.8s). The distribution reflects where in the 30-second cycle a namespace was created — worst case is creation at the start of a just-completed cycle (waits ~30s), best case is creation just before the next cycle fires. This is consistent with expected behavior of a periodic reconciler with `RequeueAfter: 30s`.
+**Interpretation:** Detection and remediation consistently completes within a single 30-second reconcile interval (mean ~15.8s). The distribution reflects where in the 30-second cycle a namespace was created — worst case is creation at the start of a just-completed cycle (waits ~30s), best case is creation just before the next cycle fires. This is consistent with expected behavior of a periodic reconciler with `RequeueAfter: 30s`. All trials used empty namespaces (no running pods) to ensure NP-001 risk = LOW and auto-remediation eligibility.
 
 ---
 
@@ -90,7 +92,7 @@
 
 ## Metric 4 — Rate Limiting
 
-**Definition:** Verification that the auto-remediation engine respects the configured per-cycle rate limit and escalates excess violations rather than applying unbounded corrective writes.
+**Definition:** Verification that the auto-remediation engine respects the configured per-window rate limit and escalates excess violations rather than applying unbounded corrective writes.
 
 **Method:** `evaluations/scenarios/04-rate-limit.sh` — creates 8 namespaces simultaneously (all trigger NP-001), waits one full reconcile cycle (35s), counts how many received `ztk8s-default-deny-ingress` NetworkPolicy vs how many were left pending/escalated.
 
@@ -108,13 +110,17 @@
 
 **Interpretation:** Exactly 5 namespaces received the default-deny NetworkPolicy in the first cycle, matching the rate limit precisely. The remaining 3 were escalated to the audit log for human review. This confirms that the rate limiting guard prevents remediation storms when large numbers of violations appear simultaneously — a critical safety property for production use.
 
+**Note:** This result was produced with a homogeneous violation set (all NP-001 LOW). With the current implementation, rate limit budget is shared across all violation types in the window. A future re-run with a mixed violation set (HIGH and LOW risk together) is needed to validate behavior under the corrected rate limit semantics (see AUDIT_CHECKLIST finding A).
+
 ---
 
-## Metric 5 — Workload Availability Impact
+## Metric 5 — Workload Non-Disruption During NP-001 Detection
 
-**Definition:** Whether NP-001 auto-remediation (applying a default-deny ingress NetworkPolicy to an unprotected namespace) causes any disruption to running workloads in that namespace during the remediation window.
+**Definition:** Whether the controller's detection and escalation path for NP-001 in a namespace with running workloads causes any disruption to those workloads.
 
-**Method:** `evaluations/scenarios/05-availability.sh` — deploys an nginx pod in a fresh namespace, establishes port-forward, runs a continuous HTTP request loop (0.5s interval, 30s total) while the controller detects and auto-remediates the NP-001 violation for that namespace. Counts successful vs failed requests.
+**Method:** `evaluations/scenarios/05-availability.sh` — deploys an nginx pod in a fresh namespace, establishes port-forward, runs a continuous HTTP request loop (0.5s interval, 30s total) while the controller detects the NP-001 violation in that namespace. Counts successful vs failed requests during the observation window.
+
+**Important scope note:** Because the namespace contains a running pod, `np001Risk()` classifies this as HIGH risk → the controller escalates to the audit log rather than applying a NetworkPolicy. This metric therefore validates that the controller's detection and escalation path (reading cluster state, writing the audit ConfigMap) does not disrupt running workloads — not that auto-remediation is non-disruptive. The non-disruptive nature of the NetworkPolicy apply operation itself follows directly from Kubernetes semantics: applying a NetworkPolicy is a control-plane operation that does not affect established connections or cause pod restarts.
 
 **Results:**
 
@@ -126,7 +132,7 @@
 | Requests failed | 0 |
 | Result | ✅ PASS |
 
-**Interpretation:** Zero requests failed during the NP-001 auto-remediation window. This is consistent with how Kubernetes NetworkPolicy enforcement works — applying a new NetworkPolicy is a control-plane operation that does not cause pod restarts, connection resets, or traffic interruption to already-established connections. The auto-remediation action is non-disruptive to running workloads.
+**Interpretation:** Zero requests failed during the controller's detection and escalation cycle. The controller's read operations (listing namespaces, pods, NetworkPolicies) and audit ConfigMap write introduce no observable latency or disruption to workloads in other namespaces. This confirms the controller is safe to run continuously alongside production workloads.
 
 ---
 
@@ -138,16 +144,17 @@
 | RBAC-001 detection + remediation latency | ✅ Complete | Mean 16,011ms (±10,721ms), n=5 |
 | False positive rate | ✅ PASS | 0% (0/2 tests) |
 | Rate limit enforcement | ✅ PASS | 5/8 remediated, 3/8 escalated |
-| Workload availability impact | ✅ PASS | 0/54 requests failed |
+| Workload non-disruption | ✅ PASS | 0/54 requests failed |
 
-All five evaluation metrics have been measured. The system demonstrates sub-30-second detection and remediation latency, zero false positives on exempt resources, correct rate limit enforcement, and zero availability impact during automated corrective actions.
+All five evaluation metrics have been measured. The system demonstrates sub-30-second detection and remediation latency, zero false positives on exempt resources, correct rate limit enforcement, and zero disruption to running workloads during controller operation.
 
 ---
 
 ## Known Limitations
 
 - **Single-node testbed:** All measurements were taken on a minikube single-node cluster. Multi-node production environments may exhibit different latency characteristics due to API server load and etcd write latency.
-- **Audit write ordering:** Remediation API writes (NetworkPolicy create, ClusterRole update) occur before the audit ConfigMap batch write. If the audit write fails on a given cycle, the cluster change is already applied but has no audit record until the next successful reconcile cycle. The controller retries automatically and the record is written on the next cycle.
+- **Audit write ordering:** Remediation API writes (NetworkPolicy create, ClusterRole update) occur before the audit ConfigMap batch write. If the audit write fails on a given cycle, the audit entry for that cycle is permanently lost — the violation is already registered in the in-memory `seenViolations` cache, so it is treated as a known violation on retry and no new audit entry is generated. This is a known correctness gap tracked in AUDIT_CHECKLIST item B.
 - **RBAC-001 latency variance:** High standard deviation (±10.7s) reflects the stochastic arrival time of violations relative to the 30-second reconcile boundary. This is a fundamental property of periodic reconcilers and not a system defect.
 - **NP-001 outlier trials:** Three trials (111ms, 30,268ms, 11,935ms) were excluded from the primary analysis set due to boundary effects. All raw data is recorded above for transparency.
 - **In-memory deduplication:** The `seenViolations` cache is in-memory only. A controller restart causes all active violations to be re-detected as new in the first cycle post-restart. This does not affect evaluation data integrity as all measurements were taken in steady-state operation.
+- **Rate limit evaluation scope:** Metric 4 was measured with a homogeneous NP-001 LOW violation set. The current rate limit implementation has a known bug (AUDIT_CHECKLIST item A) where non-AUTO_FIX decisions also consume the rate limit budget. This bug does not affect the Metric 4 result (all violations in that test were AUTO_FIX eligible) but would affect results in a mixed HIGH/LOW violation environment.

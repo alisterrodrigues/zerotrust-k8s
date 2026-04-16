@@ -22,6 +22,7 @@ spec:
       - kube-system
       - monitoring
       - test-exempt
+      - zerotrust-system
   remediation:
     mode: auto
     rateLimit: 5   # Max auto-remediations per 30-second window

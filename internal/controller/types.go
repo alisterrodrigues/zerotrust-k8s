@@ -23,6 +23,14 @@ type ViolationKey struct {
 	ViolationType string
 	ResourceName  string
 	Namespace     string
+	// SubjectName and SubjectKind are populated for RBAC-003 violations only.
+	// They allow deduplication to track each offending subject independently,
+	// preventing multiple subjects in the same binding from collapsing into one key.
+	// DEFENSE NOTE: A ClusterRoleBinding with N non-whitelisted subjects produces N
+	// distinct violation keys. Without these fields, only the first subject survives
+	// in seenViolations after the first cycle — the rest are silently suppressed.
+	SubjectName string
+	SubjectKind string
 }
 
 // ViolationEvent is the detector output consumed by later remediation stages.
@@ -36,4 +44,7 @@ type ViolationEvent struct {
 	// ResourceSnapshot is the serialized JSON of the resource at detection time.
 	ResourceSnapshot     string
 	SuggestedRemediation string
+	// SubjectName and SubjectKind are populated for RBAC-003 violations only.
+	SubjectName string
+	SubjectKind string
 }

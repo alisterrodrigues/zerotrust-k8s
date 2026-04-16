@@ -13,7 +13,7 @@
 | NP-001   | NetworkPolicy | Namespace missing a default-deny ingress NetworkPolicy                      | Namespace      |
 | NP-002   | NetworkPolicy | Namespace missing a default-deny egress NetworkPolicy                       | Namespace      |
 
-> **Note:** RBAC-006 is detection-only. NP-002 is detection-only. Neither has an autofix path — see Decision Matrix below.
+> **Note:** RBAC-006 is detection-only. NP-002 is detection-only. Neither has an autofix path.
 
 ---
 
@@ -23,7 +23,7 @@
 
 **HIGH** — violation grants cluster-wide access, involves a subject currently bound to running workloads, or has active bindings. Remediation requires deletion or modification of existing permissions.
 
-**CRITICAL** — violation involves a direct path to cluster-admin escalation, affects `kube-system` or system-prefixed roles, or the remediation action could break running system components.
+**CRITICAL** — violation involves a direct path to cluster-admin escalation, affects kube-system or system-prefixed roles, or the remediation action could break running system components.
 
 ---
 
@@ -68,7 +68,7 @@
 | RBAC-006  | LOW      | Non-system CRB candidate for scoping      | ESCALATE: Recommend namespace-scoped Role   |
 | (default) | Any      | Unmapped violation type                   | ESCALATE: Safety fallback                   |
 
-> **Decision engine location:** `internal/controller/decision.go` — `Decide()` and `decisionFromMatrix()`.
+> **Decision engine location:** `internal/controller/decision.go` — `Decide()` and `decisionFromMatrix()`. All eight violation types have explicit case branches.
 
 ---
 
@@ -104,15 +104,17 @@ The `spec.remediation.mode` field overrides the matrix action:
 
 ## Rate Limiting
 
-`spec.remediation.rateLimit` (default: 5) sets the maximum number of auto-remediations allowed within a 30-second time window. The window is shared across all reconcile cycles that fire within a 30-second period, including event-driven watch triggers. Violations that exceed the budget in the current window are escalated rather than auto-fixed.
+`spec.remediation.rateLimit` (default: 5) sets the maximum number of auto-remediations allowed within a 30-second time window. The rate limit applies to AUTO_FIX decisions only — ESCALATE, SKIP, and DRY_RUN decisions do not consume the budget. This ensures that a burst of HIGH-risk escalations cannot starve unrelated LOW-risk auto-fixes.
 
-The rate limit counter resets automatically when a new 30-second window begins. This is enforced by the `windowRateLimit()` method on the reconciler (`internal/controller/zerotrustpolicy_controller.go`).
+The window is shared across all reconcile cycles that fire within a 30-second period, including event-driven watch triggers. Violations that exceed the budget in the current window are escalated rather than auto-fixed. The counter resets automatically when a new 30-second window begins.
+
+This is enforced by the `windowRateLimit()` method on the reconciler, called inside `case DecisionActionAutoFix:` in `internal/controller/zerotrustpolicy_controller.go`.
 
 ---
 
 ## Escalation Format
 
-Every escalation and auto-remediation written to the audit log (`ztk8s-audit-log` ConfigMap in `zerotrust-system`) is a JSON line conforming to the `AuditEntry` struct (`internal/controller/auditlog.go`):
+Every escalation and auto-remediation written to the audit log (`ztk8s-audit-log` ConfigMap in the audit namespace) is a JSON line conforming to the `AuditEntry` struct (`internal/controller/auditlog.go`):
 
 ```json
 {
@@ -131,13 +133,15 @@ Every escalation and auto-remediation written to the audit log (`ztk8s-audit-log
 
 Action values: `AUTO_REMEDIATED`, `ESCALATED`, `DRY_RUN`, `SKIPPED`.
 
+All EntryID values use nanosecond-precision timestamps to prevent duplicates under burst conditions.
+
 ---
 
 ## Safety Mechanisms
 
-**Dry-run mode** (`remediation.mode: dryrun`): All AUTO_FIX decisions become DRY_RUN_LOG — the intended action is recorded in the audit log with no API writes.
+**Dry-run mode** (`remediation.mode: dryrun`): All AUTO_FIX decisions become DRY_RUN_LOG — the intended action is recorded in the audit log with no API writes. The `ztk8s_dryrun_total` Prometheus counter increments, giving operators a signal that the detection pipeline is active.
 
-**Rate limiting** (`remediation.rateLimit: 5`): Maximum N auto-remediations per 30-second time window. Enforced by a time-window counter, not a per-cycle counter, so event-driven watch bursts are correctly throttled.
+**Rate limiting** (`remediation.rateLimit: 5`): Maximum N auto-remediations per 30-second time window. Applied to AUTO_FIX decisions only. Enforced by a time-window counter, not a per-cycle counter, so event-driven watch bursts are correctly throttled.
 
 **Approval gates** (`remediation.requireApprovalFor`): Named violation types that always escalate regardless of risk level or mode. Evaluated before mode overrides.
 
@@ -145,6 +149,10 @@ Action values: `AUTO_REMEDIATED`, `ESCALATED`, `DRY_RUN`, `SKIPPED`.
 
 **Pre-remediation snapshot**: Full JSON of the target resource written to the audit ConfigMap before any mutation. Serves as a rollback record for human recovery.
 
-**Exemption list** (`networkPolicy.exemptNamespaces`): Named namespaces never flagged by NP-001 or NP-002 detectors.
+**Exemption list** (`networkPolicy.exemptNamespaces`): Named namespaces never flagged by NP-001 or NP-002 detectors. The controller's own namespace (`zerotrust-system`) should always be included to prevent self-remediation.
 
 **Idempotent autofixes**: NP-001 uses Server-Side Apply (re-apply is a no-op). RBAC-001 re-checks the role state before patching and returns a no-op if already clean.
+
+**Audit trail integrity**: `seenViolations` is updated only after `AppendAuditEntries` succeeds. A transient API failure causes the violation to be re-processed on the next retry cycle rather than silently dropped.
+
+**Audit log rotation**: When the active audit ConfigMap object approaches 850 KB, a new ConfigMap object is created (ztk8s-audit-log-2, etc.) to stay safely below Kubernetes's 1 MiB per-object limit.

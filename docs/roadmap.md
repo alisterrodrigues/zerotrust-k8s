@@ -1,87 +1,69 @@
 # Development Roadmap — Zero Trust K8s
 
-## Phase 1 — Baseline + Audit Engine + Violation Detection
+## Phase 1 — Baseline + Audit Engine + Violation Detection ✅ COMPLETE
 
 ### Deliverables
 - ZeroTrustPolicy CRD defined and registered in the cluster
-- Go project scaffolded with Kubebuilder
-- Baseline loader reads CRD into in-memory Policy Store
-- RBAC detector implemented: RBAC-001, RBAC-002, RBAC-003
-- NetworkPolicy detector implemented: NP-001
+- Go project scaffolded with Kubebuilder v4
+- RBAC detectors: RBAC-001, RBAC-002, RBAC-003
+- NetworkPolicy detector: NP-001
 - ViolationEvents printed as structured JSON to stdout
-- System runs successfully against minikube cluster and detects real violations
-
-### Dependencies
-- Go installed and working
-- minikube running and healthy
-- Kubebuilder CLI installed
-- kubectl configured to point at minikube
-
-### Risks
-- Go syntax and toolchain unfamiliarity — mitigate by having Cursor scaffold all boilerplate. Focus understanding on detector logic, not framework setup.
-- CRD schema design decisions made now are expensive to change later — finalize the ZeroTrustPolicy spec before writing controller code.
+- envtest integration test suite (Ginkgo/Gomega)
+- System runs against minikube cluster and detects real violations
 
 ---
 
-## Phase 2 — Controller Loop + Remediation Engine
+## Phase 2 — Controller Loop + Remediation Engine ✅ COMPLETE
 
 ### Deliverables
-- Remediation decision engine implemented with full decision matrix
-- AutoFix for NP-001: apply default-deny NetworkPolicy to unprotected namespace
-- AutoFix for RBAC-001 low-risk: remove wildcard verb via patch
-- Escalation records written to audit log ConfigMap with full context
-- Rate limiting implemented and tested
-- Dry-run mode working and verified
-- Pre-remediation snapshots written to audit log before every write
-- Rollback procedure documented and manually tested
-
-### Dependencies
-- Phase 1 complete
-- ZeroTrustPolicy CRD schema finalized (do not change schema after Phase 2 begins)
-
-### Risks
-- Autofix writes could break test workloads if applied to wrong namespace. Mitigate by testing exclusively in isolated minikube namespaces with no critical workloads.
-- Decision matrix edge cases. Implement dry-run first, validate all decisions are correct before enabling auto mode.
+- Remediation decision engine with full decision matrix (`internal/controller/decision.go`)
+- AutoFix for NP-001 LOW: apply `ztk8s-default-deny-ingress` NetworkPolicy (Server-Side Apply)
+- AutoFix for RBAC-001 LOW: remove wildcard verbs via Update (skips if `*` is sole verb)
+- Escalation records written to `ztk8s-audit-log` ConfigMap with full context
+- Batch audit write — single ConfigMap update per reconcile cycle
+- Time-window rate limiting (30s window, default 5 remediations)
+- Dry-run mode and manual mode working and verified
+- Pre-remediation snapshots in audit log before every write
+- `requireApprovalFor` CRD field enforced in decision engine
 
 ---
 
-## Phase 3 — Evaluation Harness + Metrics
+## Phase 3 — Observability + Evaluation ✅ COMPLETE
 
 ### Deliverables
-- Prometheus metrics endpoint live and scraping correctly
-- All test scenarios from evaluation plan implemented as scripts in `evaluations/scenarios/`
-- All 5 metrics measured and recorded with raw data
+- Prometheus metrics: `ztk8s_violations_total`, `ztk8s_remediations_total`, `ztk8s_escalations_total`, `ztk8s_cycle_duration_seconds`
+- Metrics exposed at `:8080/metrics` (plain HTTP)
+- Violation deduplication via in-memory `seenViolations` map
+- Event-driven watches for ClusterRole, ClusterRoleBinding, RoleBinding, NetworkPolicy, Namespace
+- All 5 evaluation metrics measured and recorded in `evaluations/results.md`
 - False positive test suite passing (0 FP on exempt resources)
-- Performance baseline documented
-- Availability impact test run with HTTP server workload
-- Evaluation results written to `evaluations/results.md`
-
-### Dependencies
-- Phase 2 complete and stable
-- Prometheus deployed in minikube
-- Test scenario scripts written before running any measurements (don't measure ad-hoc)
-
-### Risks
-- Metrics instrumentation is tedious but not complex — budget time for it
-- Availability impact test requires a running workload to be in place before remediation fires. Set this up at the start of Phase 3.
 
 ---
 
-## Phase 4 — Hardening + Documentation
+## Post-Audit Hardening ✅ COMPLETE (2026-04-16)
 
 ### Deliverables
-- Edge cases handled: API server unavailable, empty cluster, all-exempt cluster, zero violations cluster
-- Circuit breaker implemented and tested against Scenario 7
-- README with complete setup and install instructions
-- `docs/architecture.md` reviewed and finalized
-- `docs/threat-model.md` reviewed and finalized
-- `docs/evaluation-plan.md` updated with actual results
-- Demo script written for capstone defense presentation
-- All code commented sufficiently to explain logic during defense
+- **RBAC-004**: Wildcard verb detection on namespaced Roles
+- **RBAC-005**: Wildcard resource detection on namespaced Roles
+- **RBAC-006**: RequireNamespacedRoles enforcement (non-system CRB detector)
+- **NP-002**: Default-deny egress detection (detection-only)
+- **`denyWildcardResources`**: Independent CRD field added to `RBACSpec`; RBAC-002/005 now separately toggleable from RBAC-001/004
+- **`AuditComplete` status condition**: Written to ZeroTrustPolicy after every successful cycle
+- **Scalability fix**: `clusterRoleHasBindings` now uses single cluster-wide RoleBinding List (O(1) API calls)
+- **Audit log verbosity fix**: Decision loop iterates `newEvents` only — known violations no longer re-written every cycle
+- **Rate limit fix**: Per-cycle counter replaced with 30-second time-window counter
+- **Integration test expansion**: Two new `It()` blocks asserting RBAC-001 and NP-001 detection end-to-end
 
-### Dependencies
-- Phase 3 complete with evaluation results in hand
+---
+
+## Phase 4 — Final Report + Defense Prep (Upcoming)
+
+### Deliverables
+- Final capstone report covering all phases, post-audit hardening, and evaluation
+- Defense presentation and demo script
+- All `// DEFENSE NOTE` comments reviewed for talking points
+- Documentation final review
 
 ### Rules for Phase 4
-- Add no new features. Harden and document only what exists.
-- Every addition must serve the demo or the defense — if it doesn't, cut it.
+- Add no new features. Consolidate and document only what exists.
+- Every addition must serve the defense or the final report.

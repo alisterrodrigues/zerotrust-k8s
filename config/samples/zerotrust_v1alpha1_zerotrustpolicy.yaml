@@ -8,21 +8,22 @@ metadata:
   name: cluster-baseline
 spec:
   rbac:
-    denyWildcardVerbs: true
-    denyClusterAdminBinding:
+    denyWildcardVerbs: true        # Enables RBAC-001 (ClusterRole) and RBAC-004 (Role) detection
+    denyWildcardResources: true    # Enables RBAC-002 (ClusterRole) and RBAC-005 (Role) detection
+    denyClusterAdminBinding:       # Enables RBAC-003 detection
       excludeServiceAccounts:
         - system:masters
         - kube-system/*
-    requireNamespacedRoles: true
+    requireNamespacedRoles: true   # Enables RBAC-006 detection
   networkPolicy:
-    requireDefaultDenyIngress: true
-    requireDefaultDenyEgress: false
+    requireDefaultDenyIngress: true  # Enables NP-001 detection
+    requireDefaultDenyEgress: false  # Set true to enable NP-002 detection
     exemptNamespaces:
       - kube-system
       - monitoring
       - test-exempt
   remediation:
     mode: auto
-    rateLimit: 5
+    rateLimit: 5   # Max auto-remediations per 30-second window
     requireApprovalFor:
       - ClusterAdminBinding

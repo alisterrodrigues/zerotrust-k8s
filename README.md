@@ -7,23 +7,38 @@ Team: Alister Rodrigues, Pranav Karelia, Siddhant Patel.
 
 ## What This Is
 
-A Kubernetes-native operator that continuously audits RBAC and NetworkPolicy configurations against a formally defined Zero Trust baseline. The system detects violations, automatically remediates low-risk misconfigurations (NP-001, RBAC-001 LOW), escalates high-risk ones for human review, and exposes Prometheus metrics for observability.
+A Kubernetes-native operator that continuously audits RBAC and NetworkPolicy configurations against a formally defined Zero Trust baseline. The system detects violations across eight violation types, automatically remediates low-risk misconfigurations (NP-001 LOW, RBAC-001 LOW), escalates high-risk ones for human review, and exposes Prometheus metrics for observability.
 
 ## Status
 
-**Phase 3 complete.** All three implementation phases are done:
-- Phase 1: ZeroTrustPolicy CRD, four detectors (RBAC-001/002/003, NP-001), structured JSON logging
-- Phase 2: Remediation engine, NP-001 + RBAC-001 autofixes, audit log, rate limiting, dry-run mode
-- Phase 3: Prometheus metrics, violation deduplication, formal evaluation (all 5 metrics measured)
+**All three implementation phases complete. Post-audit hardening applied.**
+
+- Phase 1: ZeroTrustPolicy CRD, four detectors (RBAC-001/002/003, NP-001), structured JSON logging, envtest integration tests
+- Phase 2: Remediation engine, NP-001 + RBAC-001 autofixes, ConfigMap audit log, time-window rate limiting, dry-run mode
+- Phase 3: Prometheus metrics, violation deduplication, event-driven watches, formal evaluation (all 5 metrics measured)
+- Post-audit: Four additional detectors (RBAC-004/005/006, NP-002), independent `denyWildcardResources` CRD field, AuditComplete status conditions, scalability fix in binding lookup, expanded integration tests
 
 See [`evaluations/results.md`](evaluations/results.md) for full evaluation results.
 
+## Detectors
+
+| ID       | Description                                                         | Risk Levels        | Autofix? |
+|----------|---------------------------------------------------------------------|--------------------|----------|
+| RBAC-001 | Wildcard verb in ClusterRole                                        | LOW / HIGH / CRITICAL | Yes (LOW only) |
+| RBAC-002 | Wildcard resource in ClusterRole                                    | HIGH               | No       |
+| RBAC-003 | cluster-admin bound to non-whitelisted subject                      | HIGH / CRITICAL    | No       |
+| RBAC-004 | Wildcard verb in namespaced Role                                    | HIGH               | No       |
+| RBAC-005 | Wildcard resource in namespaced Role                                | HIGH               | No       |
+| RBAC-006 | Non-system ClusterRoleBinding candidate for namespace-scoping       | LOW                | No       |
+| NP-001   | Namespace missing default-deny ingress NetworkPolicy                | LOW / HIGH / CRITICAL | Yes (LOW only) |
+| NP-002   | Namespace missing default-deny egress NetworkPolicy                 | HIGH / CRITICAL    | No       |
+
 ## Documentation
 
-- [Architecture](docs/architecture.md) — system design, components, event flow
-- [Remediation Model](docs/remediation-model.md) — violation types, risk levels, decision matrix
-- [Threat Model](docs/threat-model.md) — STRIDE analysis, trust boundaries, limitations
-- [Evaluation Plan](docs/evaluation-plan.md) — metrics and test scenarios
+- [Architecture](docs/architecture.md) — system design, components, event flow, CRD schema
+- [Remediation Model](docs/remediation-model.md) — violation types, risk levels, decision matrix, safety mechanisms
+- [Threat Model](docs/threat-model.md) — STRIDE analysis, trust boundaries, known limitations
+- [Evaluation Plan](docs/evaluation-plan.md) — metrics definitions and test scenarios
 - [Evaluation Results](evaluations/results.md) — measured results for all 5 metrics
 - [Roadmap](docs/roadmap.md) — phased deliverables
 
@@ -42,14 +57,14 @@ zerotrust-k8s/
 │   ├── scenarios/             # Evaluation scenario shell scripts
 │   └── results.md             # Formal evaluation results
 ├── internal/controller/
-│   ├── auditlog.go            # ConfigMap audit log writer
-│   ├── decision.go            # Remediation decision engine
-│   ├── detection.go           # RBAC-001/002/003 and NP-001 detectors
+│   ├── auditlog.go            # ConfigMap audit log writer (batch, key-rollover)
+│   ├── decision.go            # Remediation decision engine (Decide + decisionFromMatrix)
+│   ├── detection.go           # All detectors: RBAC-001–006, NP-001–002
 │   ├── metrics.go             # Prometheus counters and histograms
-│   ├── remediation.go         # NP-001 and RBAC-001 autofixes
-│   ├── types.go               # ViolationEvent, ViolationKey types
-│   ├── violation_log.go       # Structured zerolog violation logging
-│   └── zerotrustpolicy_controller.go  # Main reconcile loop
+│   ├── remediation.go         # NP-001 and RBAC-001 autofix implementations
+│   ├── types.go               # ViolationEvent, ViolationKey, AuditEntry types
+│   ├── violation_log.go       # Structured zerolog violation logging (stdout)
+│   └── zerotrustpolicy_controller.go  # Main reconcile loop, watches, rate limiting
 ├── setup.sh                   # Session setup script (run before make run)
 ├── Makefile                   # Build, test, install targets
 └── .cursorrules               # AI coding assistant context
@@ -78,11 +93,7 @@ git pull
 make run
 ```
 
-`setup.sh` creates required namespaces, installs CRDs, applies the `cluster-baseline` CR, and resets the audit log ConfigMap. `make run` starts the controller. Wait for:
-```
-reconcile cycle summary ... new_violations: 0 known_violations: 9
-```
-That indicates steady state — all pre-existing violations have been detected and handled.
+`setup.sh` creates required namespaces, installs CRDs, applies the `cluster-baseline` CR, and resets the audit log ConfigMap. `make run` starts the controller. Wait for the reconcile cycle summary log to settle at `new_violations: 0` — that indicates steady state.
 
 **Step 3 — Run evaluation scenarios (in a second terminal):**
 ```bash
@@ -102,4 +113,9 @@ curl http://localhost:8080/metrics | grep ztk8s
 **Inspect audit log:**
 ```bash
 kubectl get configmap ztk8s-audit-log -n zerotrust-system -o jsonpath='{.data.audit\.log}' | python3 -m json.tool --no-ensure-ascii 2>/dev/null | head -100
+```
+
+**Check ZeroTrustPolicy status conditions:**
+```bash
+kubectl describe zerotrustpolicy cluster-baseline
 ```

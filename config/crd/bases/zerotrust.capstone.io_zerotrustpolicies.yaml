@@ -83,6 +83,11 @@ spec:
                           type: string
                         type: array
                     type: object
+                  denyWildcardResources:
+                    description: |-
+                      DenyWildcardResources, when true, forbids any ClusterRole/Role with resources: ["*"].
+                      This is intentionally separate from DenyWildcardVerbs so each can be toggled independently.
+                    type: boolean
                   denyWildcardVerbs:
                     description: 'DenyWildcardVerbs, when true, forbids any ClusterRole/Role
                       with verbs: ["*"] or resources: ["*"].'

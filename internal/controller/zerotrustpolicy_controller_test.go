@@ -21,11 +21,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	zerotrustv1alpha1 "github.com/capstone/zerotrust-k8s/api/v1alpha1"
 )
@@ -89,6 +90,79 @@ var _ = Describe("ZeroTrustPolicy Controller", func() {
 			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: baselineKey})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(Equal(auditRequeueInterval))
+		})
+
+		It("should detect RBAC-001 when a ClusterRole with wildcard verbs exists", func() {
+			// DEFENSE NOTE: This test injects a ClusterRole with verbs: ["*"] and verifies
+			// that runDetections returns at least one RBAC-001 violation event. It confirms
+			// the detection pipeline fires end-to-end with a real envtest API server.
+			By("creating a ClusterRole with wildcard verbs")
+			wildcardRole := &rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-wildcard-verbs"},
+				Rules: []rbacv1.PolicyRule{
+					{Verbs: []string{"*"}, APIGroups: []string{""}, Resources: []string{"pods"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, wildcardRole)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, wildcardRole)
+			})
+
+			By("loading the cluster-baseline policy")
+			var policy zerotrustv1alpha1.ZeroTrustPolicy
+			Expect(k8sClient.Get(ctx, baselineKey, &policy)).To(Succeed())
+
+			By("running detections directly")
+			reconciler := &ZeroTrustPolicyReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			events, err := reconciler.runDetections(ctx, &policy)
+			Expect(err).NotTo(HaveOccurred())
+
+			found := false
+			for _, e := range events {
+				if e.ViolationType == "RBAC-001" && e.ResourceName == "test-wildcard-verbs" {
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue(), "expected RBAC-001 violation for test-wildcard-verbs")
+		})
+
+		It("should detect NP-001 when a namespace has no default-deny NetworkPolicy", func() {
+			// DEFENSE NOTE: This test creates a namespace with no NetworkPolicy and verifies
+			// that runDetections returns an NP-001 violation for it. Confirms the NP detection
+			// pipeline is wired correctly end-to-end with a real API server and namespace object.
+			By("creating a namespace with no NetworkPolicy")
+			testNS := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-no-netpol"},
+			}
+			Expect(k8sClient.Create(ctx, testNS)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, testNS)
+			})
+
+			By("loading the cluster-baseline policy")
+			var policy zerotrustv1alpha1.ZeroTrustPolicy
+			Expect(k8sClient.Get(ctx, baselineKey, &policy)).To(Succeed())
+
+			By("running detections directly")
+			reconciler := &ZeroTrustPolicyReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			events, err := reconciler.runDetections(ctx, &policy)
+			Expect(err).NotTo(HaveOccurred())
+
+			found := false
+			for _, e := range events {
+				if e.ViolationType == "NP-001" && e.ResourceName == "test-no-netpol" {
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue(), "expected NP-001 violation for test-no-netpol")
 		})
 	})
 })

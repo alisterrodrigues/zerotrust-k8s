@@ -26,6 +26,8 @@ import (
 	netv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +57,16 @@ type ZeroTrustPolicyReconciler struct {
 	// the same persistent misconfiguration from being counted multiple times across reconcile cycles,
 	// which would inflate detection metrics and make evaluation data meaningless.
 	seenViolations map[ViolationKey]time.Time
+
+	// rateLimitWindowStart is the start of the current rate-limit measurement window.
+	// DEFENSE NOTE: Using a time window instead of a per-cycle counter means the rate
+	// limit is enforced across all reconcile cycles that fire within a single 30-second
+	// window — whether triggered by the RequeueAfter timer or by event-driven watches.
+	// This correctly throttles remediation storms regardless of how violations arrive.
+	rateLimitWindowStart time.Time
+
+	// rateLimitWindowCount tracks how many remediations have fired in the current window.
+	rateLimitWindowCount int
 }
 
 // +kubebuilder:rbac:groups=zerotrust.capstone.io,resources=zerotrustpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -138,9 +150,9 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	skippedCount := 0
 	pendingAuditEntries := make([]AuditEntry, 0)
 
-	for _, event := range events {
+	for _, event := range newEvents {
 		decision := Decide(event, policy.Spec)
-		if autoFixedCount >= rateLimit {
+		if !r.windowRateLimit(rateLimit) {
 			decision = RemediationDecision{
 				Action:          DecisionActionEscalate,
 				Reason:          "rate limit exceeded",
@@ -262,7 +274,48 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		skippedCount,
 	)
 
+	// DEFENSE NOTE: Writing an AuditComplete status condition after every successful cycle
+	// makes the ZeroTrustPolicy resource observable via `kubectl get zerotrustpolicy` and
+	// `kubectl describe zerotrustpolicy cluster-baseline`. Operators can see at a glance
+	// whether the last audit cycle completed and when — this is the Kubernetes-native
+	// observability pattern for custom controllers.
+	auditCondition := metav1.Condition{
+		Type:               "AuditComplete",
+		Status:             metav1.ConditionTrue,
+		Reason:             "CycleComplete",
+		Message:            fmt.Sprintf("Audit cycle complete. Violations: %d total (%d new). Remediated: %d. Escalated: %d.", len(events), len(newEvents), autoFixedCount, escalatedCount),
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: policy.Generation,
+	}
+	// Use apimeta.SetStatusCondition to handle idempotent upsert of the condition.
+	apimeta.SetStatusCondition(&policy.Status.Conditions, auditCondition)
+	if err := r.Status().Update(ctx, &policy); err != nil {
+		// Non-fatal: log and continue. Status is best-effort; a failed status
+		// update does not invalidate the audit cycle itself.
+		logger.Error(err, "failed to update ZeroTrustPolicy status conditions")
+	}
+
 	return ctrl.Result{RequeueAfter: auditRequeueInterval}, nil
+}
+
+// windowRateLimit returns true if a remediation may proceed given the configured
+// rate limit per 30-second window. It resets the window when 30 seconds have elapsed.
+//
+// DEFENSE NOTE: The window duration matches auditRequeueInterval (30s) so the rate
+// limit budget is semantically "N remediations per audit cycle" even when watches
+// fire multiple reconcile calls within that cycle.
+func (r *ZeroTrustPolicyReconciler) windowRateLimit(limit int) bool {
+	now := time.Now()
+	if now.Sub(r.rateLimitWindowStart) >= auditRequeueInterval {
+		// Window expired — reset counter and start a new window.
+		r.rateLimitWindowStart = now
+		r.rateLimitWindowCount = 0
+	}
+	if r.rateLimitWindowCount >= limit {
+		return false
+	}
+	r.rateLimitWindowCount++
+	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.

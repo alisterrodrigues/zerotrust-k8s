@@ -39,6 +39,11 @@ type RBACSpec struct {
 	// +optional
 	DenyWildcardVerbs *bool `json:"denyWildcardVerbs,omitempty"`
 
+	// DenyWildcardResources, when true, forbids any ClusterRole/Role with resources: ["*"].
+	// This is intentionally separate from DenyWildcardVerbs so each can be toggled independently.
+	// +optional
+	DenyWildcardResources *bool `json:"denyWildcardResources,omitempty"`
+
 	// DenyClusterAdminBinding configures enforcement of "no cluster-admin for non-system accounts".
 	// When set, only excludeServiceAccounts are allowed to be bound to cluster-admin.
 	// +optional

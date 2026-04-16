@@ -13,38 +13,11 @@ every fix session.
 
 ---
 
-## MEDIUM — Open Items
+## OPEN ITEMS
 
-### M-4 — `DenyWildcardVerbs` flag silently controls RBAC-002 detection
-**File:** `internal/controller/detection.go`  
-**Status:** 🟡 WARN  
-**Description:** Both `hasWildcardVerb` and `hasWildcardResource` are checked under the single
-`DenyWildcardVerbs` flag. RBAC-002 cannot be independently toggled. CRD design inconsistency.
-
----
-
-## LOW — Polish, Scalability, and Test Coverage
-
-### L-2 — Controller integration test only asserts RequeueAfter, no violation detection
-**File:** `internal/controller/zerotrustpolicy_controller_test.go`  
-**Status:** 🟡 WARN  
-**Fix:** Add two `It()` blocks: one ClusterRole with `verbs: ["*"]` asserting RBAC-001;
-one namespace with no NetworkPolicy asserting NP-001.
-
-### L-3 — `ZeroTrustPolicyStatus` conditions never written
-**File:** `internal/controller/zerotrustpolicy_controller.go`  
-**Status:** 🟡 WARN  
-**Fix:** After cycle summary log, write a `metav1.Condition` of type `AuditComplete`.
-
-### L-4 — `RequireNamespacedRoles` field defined but never enforced
-**File:** `api/v1alpha1/zerotrustpolicy_types.go`, `internal/controller/detection.go`  
-**Status:** 🔴 OPEN (confirmed by code review — no check exists in runDetections)
-
-### NF-7 — `clusterRoleHasBindings` issues one API call per namespace (scalability)
-**File:** `internal/controller/detection.go`, `clusterRoleHasBindings`  
-**Status:** 🟡 WARN  
-**Description:** Per-namespace RoleBinding loop — one `r.List` call per namespace. Replace with
-a single cluster-wide `r.List(ctx, &rbList)` then filter in memory for production scalability.
+*No open items remain as of 2026-04-16. All known bugs, gaps, and checklist items
+have been resolved. The next additions to this file will come from the second-round
+audit (Cursor + Codex + ChatGPT) run against the post-fix codebase.*
 
 ---
 
@@ -79,3 +52,22 @@ a single cluster-wide `r.List(ctx, &rbList)` then filter in memory for productio
 - ✅ FIXED 2026-04-09 — NF-5: `hasDefaultDenyIngress` accepts implicit default-deny (empty `policyTypes`)
 - ✅ FIXED 2026-04-09 — NF-6: `results.md` Metric 3 Test 2 description corrected; stale Known Limitations note updated
 - ✅ FIXED 2026-04-09 — NF-8: `kube-system` guard in `applyRemediation` annotated as intentional defense-in-depth
+- ✅ FIXED 2026-04-16 — Audit log verbosity regression: decision loop now iterates `newEvents` only;
+  known persistent violations no longer written to audit ConfigMap every cycle
+- ✅ FIXED 2026-04-16 — Rate limit regression: replaced per-cycle `autoFixedCount >= rateLimit` gate with
+  `windowRateLimit()` method using a 30-second time window; budget now shared across all rapid reconcile
+  cycles within a single window, correctly throttling event-driven watch bursts
+- ✅ FIXED 2026-04-16 — M-4: Added `DenyWildcardResources *bool` as independent CRD field in `RBACSpec`;
+  RBAC-001/RBAC-004 now gated on `DenyWildcardVerbs`, RBAC-002/RBAC-005 now gated on `DenyWildcardResources`;
+  each check independently toggleable
+- ✅ FIXED 2026-04-16 — L-2: Integration test expanded with two new `It()` blocks: RBAC-001 assertion on
+  wildcard-verb ClusterRole injection, NP-001 assertion on NetworkPolicy-free namespace creation;
+  all 3/3 specs pass via envtest
+- ✅ FIXED 2026-04-16 — L-3: `AuditComplete` metav1.Condition written to ZeroTrustPolicy status after every
+  successful reconcile cycle using `apimeta.SetStatusCondition`; idempotent upsert, non-fatal on failure
+- ✅ FIXED 2026-04-16 — L-4: `detectRequireNamespacedRoles` implemented as RBAC-006 detector; scans
+  ClusterRoleBindings for non-system subjects bound to non-system ClusterRoles; wired into `runDetections`
+  behind the `RequireNamespacedRoles` flag; detection-only (no autofix), LOW risk
+- ✅ FIXED 2026-04-16 — NF-7: Replaced O(N namespace) per-namespace RoleBinding loop in
+  `clusterRoleHasBindings` with a single cluster-wide `r.List(ctx, &rbList)` + in-memory filter;
+  O(1) API calls regardless of namespace count

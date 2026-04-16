@@ -37,18 +37,15 @@ func (r *ZeroTrustPolicyReconciler) runDetections(ctx context.Context, policy *z
 	events := make([]ViolationEvent, 0)
 
 	if policy.Spec.RBAC != nil {
-		if boolPtrVal(policy.Spec.RBAC.DenyWildcardVerbs, false) {
-			wildcardEvents, err := r.detectWildcardClusterRoles(ctx)
+		if boolPtrVal(policy.Spec.RBAC.DenyWildcardVerbs, false) || boolPtrVal(policy.Spec.RBAC.DenyWildcardResources, false) {
+			wildcardEvents, err := r.detectWildcardClusterRoles(ctx, policy.Spec.RBAC)
 			if err != nil {
 				return nil, err
 			}
 			events = append(events, wildcardEvents...)
 		}
-		// RBAC-004 / RBAC-005: namespaced Role wildcard detection.
-		// Uses same DenyWildcardVerbs flag as RBAC-001/002 — both cluster and namespaced
-		// roles are audited when the operator enables wildcard detection.
-		if boolPtrVal(policy.Spec.RBAC.DenyWildcardVerbs, false) {
-			namespacedEvents, err := r.detectWildcardNamespacedRoles(ctx)
+		if boolPtrVal(policy.Spec.RBAC.DenyWildcardVerbs, false) || boolPtrVal(policy.Spec.RBAC.DenyWildcardResources, false) {
+			namespacedEvents, err := r.detectWildcardNamespacedRoles(ctx, policy.Spec.RBAC)
 			if err != nil {
 				return nil, err
 			}
@@ -61,6 +58,13 @@ func (r *ZeroTrustPolicyReconciler) runDetections(ctx context.Context, policy *z
 				return nil, err
 			}
 			events = append(events, bindingEvents...)
+		}
+		if boolPtrVal(policy.Spec.RBAC.RequireNamespacedRoles, false) {
+			namespacedRoleEvents, err := r.detectRequireNamespacedRoles(ctx)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, namespacedRoleEvents...)
 		}
 	}
 
@@ -85,8 +89,8 @@ func (r *ZeroTrustPolicyReconciler) runDetections(ctx context.Context, policy *z
 }
 
 // detectWildcardClusterRoles implements RBAC-001 (wildcard verbs) and RBAC-002 (wildcard resources)
-// on ClusterRole objects only, per Phase 1 scope.
-func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Context) ([]ViolationEvent, error) {
+// on ClusterRole objects only, per Phase 1 scope. rbacSpec gates which violation types are emitted.
+func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Context, rbacSpec *zerotrustv1alpha1.RBACSpec) ([]ViolationEvent, error) {
 	var list rbacv1.ClusterRoleList
 	if err := r.List(ctx, &list); err != nil {
 		return nil, err
@@ -97,7 +101,7 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Conte
 		cr := &list.Items[i]
 		hasWildcardVerb, hasWildcardResource := clusterRoleWildcardFlags(cr)
 
-		if hasWildcardVerb {
+		if hasWildcardVerb && boolPtrVal(rbacSpec.DenyWildcardVerbs, false) {
 			risk, err := r.rbac001Risk(ctx, cr.Name)
 			if err != nil {
 				return nil, err
@@ -116,8 +120,11 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Conte
 			}
 			events = append(events, event)
 		}
-		if hasWildcardResource {
-			// DEFENSE NOTE: docs/remediation-model.md assigns RBAC-002 = HIGH in all contexts.
+		if hasWildcardResource && boolPtrVal(rbacSpec.DenyWildcardResources, false) {
+			// DEFENSE NOTE: RBAC-002 is now independently controlled by DenyWildcardResources.
+			// Previously both RBAC-001 and RBAC-002 were gated on DenyWildcardVerbs, which meant
+			// RBAC-002 could not be disabled without also disabling RBAC-001. This CRD design fix
+			// makes each check independently toggleable.
 			logViolation("RBAC-002", cr.Name, "", "HIGH")
 			event, err := newViolationEvent(
 				"RBAC-002",
@@ -150,12 +157,13 @@ func clusterRoleWildcardFlags(cr *rbacv1.ClusterRole) (hasWildcardVerb, hasWildc
 
 // detectWildcardNamespacedRoles implements RBAC-004 (wildcard verbs) and RBAC-005
 // (wildcard resources) on namespaced Role objects across all namespaces.
+// rbacSpec gates which violation types are emitted independently.
 //
 // DEFENSE NOTE: RBAC-001/002 only cover ClusterRoles. A developer can bypass
 // cluster-level detection entirely by creating a namespaced Role with wildcard
 // verbs in their own namespace. RBAC-004/005 close this gap by scanning every
 // Role in every namespace using the same wildcard logic applied to ClusterRoles.
-func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Context) ([]ViolationEvent, error) {
+func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Context, rbacSpec *zerotrustv1alpha1.RBACSpec) ([]ViolationEvent, error) {
 	var nsList corev1.NamespaceList
 	if err := r.List(ctx, &nsList); err != nil {
 		return nil, err
@@ -172,8 +180,7 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Co
 			role := &roleList.Items[j]
 			hasWildcardVerb, hasWildcardResource := namespacedRoleWildcardFlags(role)
 
-			if hasWildcardVerb {
-				// RBAC-004: namespaced Role with wildcard verbs — always HIGH per remediation model.
+			if hasWildcardVerb && boolPtrVal(rbacSpec.DenyWildcardVerbs, false) {
 				logViolation("RBAC-004", role.Name, nsName, "HIGH")
 				event, err := newViolationEvent(
 					"RBAC-004",
@@ -188,8 +195,7 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Co
 				}
 				events = append(events, event)
 			}
-			if hasWildcardResource {
-				// RBAC-005: namespaced Role with wildcard resources — always HIGH per remediation model.
+			if hasWildcardResource && boolPtrVal(rbacSpec.DenyWildcardResources, false) {
 				logViolation("RBAC-005", role.Name, nsName, "HIGH")
 				event, err := newViolationEvent(
 					"RBAC-005",
@@ -249,20 +255,17 @@ func (r *ZeroTrustPolicyReconciler) clusterRoleHasBindings(ctx context.Context, 
 		}
 	}
 
-	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList); err != nil {
+	// DEFENSE NOTE: A single cluster-wide List is O(1) API calls regardless of namespace
+	// count, compared to the previous O(N) loop which issued one API call per namespace.
+	// In clusters with hundreds of namespaces this is a significant scalability improvement.
+	// controller-runtime's informer cache makes this call local (no network round-trip).
+	var rbList rbacv1.RoleBindingList
+	if err := r.List(ctx, &rbList); err != nil {
 		return false, err
 	}
-	for i := range nsList.Items {
-		nsName := nsList.Items[i].Name
-		var rbList rbacv1.RoleBindingList
-		if err := r.List(ctx, &rbList, client.InNamespace(nsName)); err != nil {
-			return false, err
-		}
-		for j := range rbList.Items {
-			if roleRefPointsToClusterRole(rbList.Items[j].RoleRef, clusterRoleName) {
-				return true, nil
-			}
+	for i := range rbList.Items {
+		if roleRefPointsToClusterRole(rbList.Items[i].RoleRef, clusterRoleName) {
+			return true, nil
 		}
 	}
 	return false, nil
@@ -352,6 +355,57 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 		}
 	}
 
+	return events, nil
+}
+
+// detectRequireNamespacedRoles implements the RequireNamespacedRoles enforcement:
+// it scans all ClusterRoleBindings and flags any that bind a non-system user or
+// service account to a non-system ClusterRole, suggesting the binding could instead
+// reference a namespaced Role scoped to the relevant namespace.
+//
+// DEFENSE NOTE: RequireNamespacedRoles is a Zero Trust "least privilege" principle —
+// cluster-scoped roles grant permissions in ALL namespaces. Any ClusterRoleBinding
+// for application workloads (non-system) is a candidate for downscoping to a
+// namespaced Role+RoleBinding pair. This detector surfaces those cases for human review;
+// it does not auto-remediate because the correct scoped replacement depends on workload intent.
+func (r *ZeroTrustPolicyReconciler) detectRequireNamespacedRoles(ctx context.Context) ([]ViolationEvent, error) {
+	var crbList rbacv1.ClusterRoleBindingList
+	if err := r.List(ctx, &crbList); err != nil {
+		return nil, err
+	}
+
+	events := make([]ViolationEvent, 0)
+	for i := range crbList.Items {
+		crb := &crbList.Items[i]
+		// Skip system ClusterRoles — these legitimately need cluster scope.
+		if strings.HasPrefix(crb.RoleRef.Name, "system:") {
+			continue
+		}
+		for _, sub := range crb.Subjects {
+			// Skip system service accounts (kube-system namespace).
+			if sub.Kind == rbacv1.ServiceAccountKind && sub.Namespace == metav1NamespaceKubeSystem {
+				continue
+			}
+			// Skip system users and groups (names starting with "system:").
+			if strings.HasPrefix(sub.Name, "system:") {
+				continue
+			}
+			logViolation("RBAC-006", crb.Name, sub.Namespace, "LOW")
+			event, err := newViolationEvent(
+				"RBAC-006",
+				crb.Name,
+				sub.Namespace,
+				"LOW",
+				crb,
+				"Consider replacing this ClusterRoleBinding with a namespaced Role and RoleBinding scoped to the relevant namespace.",
+			)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, event)
+			break // one violation per binding — subject already identifies the concern
+		}
+	}
 	return events, nil
 }
 

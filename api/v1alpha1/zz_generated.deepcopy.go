@@ -83,6 +83,11 @@ func (in *RBACSpec) DeepCopyInto(out *RBACSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.DenyWildcardResources != nil {
+		in, out := &in.DenyWildcardResources, &out.DenyWildcardResources
+		*out = new(bool)
+		**out = **in
+	}
 	if in.DenyClusterAdminBinding != nil {
 		in, out := &in.DenyClusterAdminBinding, &out.DenyClusterAdminBinding
 		*out = new(DenyClusterAdminBindingConfig)

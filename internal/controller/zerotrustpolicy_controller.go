@@ -306,25 +306,30 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		skippedCount,
 	)
 
-	// DEFENSE NOTE: Writing an AuditComplete status condition after every successful cycle
-	// makes the ZeroTrustPolicy resource observable via `kubectl get zerotrustpolicy` and
-	// `kubectl describe zerotrustpolicy cluster-baseline`. Operators can see at a glance
-	// whether the last audit cycle completed and when — this is the Kubernetes-native
-	// observability pattern for custom controllers.
-	auditCondition := metav1.Condition{
-		Type:               "AuditComplete",
-		Status:             metav1.ConditionTrue,
-		Reason:             "CycleComplete",
-		Message:            fmt.Sprintf("Audit cycle complete. Violations: %d total (%d new). Remediated: %d. Escalated: %d.", len(events), len(newEvents), autoFixedCount, escalatedCount),
-		LastTransitionTime: metav1.Now(),
-		ObservedGeneration: policy.Generation,
-	}
-	// Use apimeta.SetStatusCondition to handle idempotent upsert of the condition.
-	apimeta.SetStatusCondition(&policy.Status.Conditions, auditCondition)
-	if err := r.Status().Update(ctx, &policy); err != nil {
-		// Non-fatal: log and continue. Status is best-effort; a failed status
-		// update does not invalidate the audit cycle itself.
-		logger.Error(err, "failed to update ZeroTrustPolicy status conditions")
+	// DEFENSE NOTE: Re-fetch the policy object immediately before the status update to
+	// get the latest resourceVersion. Under event-driven watch bursts, multiple reconcile
+	// cycles fire in rapid succession. Without re-fetching, all of them attempt
+	// r.Status().Update() with the same stale resourceVersion — all but the first fail
+	// with "the object has been modified". Re-fetching here is the standard
+	// controller-runtime pattern for status subresource updates.
+	var freshPolicy zerotrustv1alpha1.ZeroTrustPolicy
+	if err := r.Get(ctx, client.ObjectKey{Name: clusterBaselineName}, &freshPolicy); err != nil {
+		// Non-fatal: if we can't re-fetch, skip the status update this cycle.
+		logger.Error(err, "failed to re-fetch ZeroTrustPolicy for status update")
+	} else {
+		auditCondition := metav1.Condition{
+			Type:               "AuditComplete",
+			Status:             metav1.ConditionTrue,
+			Reason:             "CycleComplete",
+			Message:            fmt.Sprintf("Audit cycle complete. Violations: %d total (%d new). Remediated: %d. Escalated: %d.", len(events), len(newEvents), autoFixedCount, escalatedCount),
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: freshPolicy.Generation,
+		}
+		apimeta.SetStatusCondition(&freshPolicy.Status.Conditions, auditCondition)
+		if err := r.Status().Update(ctx, &freshPolicy); err != nil {
+			// Non-fatal: status is best-effort.
+			logger.Error(err, "failed to update ZeroTrustPolicy status conditions")
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: auditRequeueInterval}, nil

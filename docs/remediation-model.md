@@ -77,7 +77,7 @@
 The following actions may be executed automatically when risk level is LOW and remediation mode is `auto`:
 
 - **NP-001 LOW**: Apply a `ztk8s-default-deny-ingress` NetworkPolicy to an unprotected empty namespace. Uses Server-Side Apply — idempotent, safe to repeat.
-- **RBAC-001 LOW**: Remove wildcard verbs from a non-system ClusterRole that has no active bindings. Uses `Update`. If `*` is the sole verb in a rule (no safe replacement), the autofix is skipped and the violation is left for human review.
+- **RBAC-001 LOW**: Remove wildcard verbs from a non-system ClusterRole that has no active bindings. Uses `Update`. If `*` is the sole verb in a rule (no safe replacement without inventing verbs), the autofix produces a `SKIPPED` audit entry with `ztk8s_skipped_total` incremented — the violation is recorded for human review rather than silently dropped.
 
 The following actions are **never** auto-executed regardless of risk or mode:
 
@@ -114,7 +114,7 @@ This is enforced by the `windowRateLimit()` method on the reconciler, called ins
 
 ## Escalation Format
 
-Every escalation and auto-remediation written to the audit log (`ztk8s-audit-log` ConfigMap in the audit namespace) is a JSON line conforming to the `AuditEntry` struct (`internal/controller/auditlog.go`):
+Every action written to the audit log (`ztk8s-audit-log` ConfigMap in the audit namespace) is a JSON line conforming to the `AuditEntry` struct (`internal/controller/auditlog.go`):
 
 ```json
 {
@@ -155,4 +155,4 @@ All EntryID values use nanosecond-precision timestamps to prevent duplicates und
 
 **Audit trail integrity**: `seenViolations` is updated only after `AppendAuditEntries` succeeds. A transient API failure causes the violation to be re-processed on the next retry cycle rather than silently dropped.
 
-**Audit log rotation**: When the active audit ConfigMap object approaches 850 KB, a new ConfigMap object is created (ztk8s-audit-log-2, etc.) to stay safely below Kubernetes's 1 MiB per-object limit.
+**Audit log rotation**: When appending entries would push the active ConfigMap object over 850 KB, a new ConfigMap object is created immediately (`ztk8s-audit-log-2`, etc.) to stay safely below Kubernetes's 1 MiB per-object limit.

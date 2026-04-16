@@ -30,6 +30,12 @@ for i in $(seq 2 20); do
   kubectl delete configmap "ztk8s-audit-log-${i}" -n zerotrust-system --ignore-not-found 2>/dev/null || true
 done
 
+echo "==> Cleaning up stale evaluation ClusterRoles from prior sessions..."
+# eval-rbac001-* ClusterRoles accumulate when Scenario 02 times out before cleanup runs.
+# These leave stale RBAC-001 violations silently suppressed in seenViolations across sessions.
+kubectl get clusterrole -o name 2>/dev/null | grep "clusterrole/eval-rbac001-" | \
+  xargs -r kubectl delete --ignore-not-found 2>/dev/null || true
+
 echo "==> Installing CRDs..."
 make install
 

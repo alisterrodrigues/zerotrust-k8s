@@ -233,6 +233,51 @@ func AppendAuditEntries(ctx context.Context, k8sClient client.Client, entries []
 		cm.Data = map[string]string{}
 	}
 
+	// DEFENSE NOTE: Check post-append size before writing. currentAuditConfigMapName()
+	// checks size before this call, but a large batch of entries arriving near the
+	// threshold can push the object over auditLogMaxObjectBytes. If the append would
+	// overflow, rotate to the next ConfigMap object now rather than after the fact.
+	pendingSize := 0
+	for _, line := range lines {
+		pendingSize += len(line)
+	}
+	currentSize := 0
+	for _, v := range cm.Data {
+		currentSize += len(v)
+	}
+	if currentSize+pendingSize >= auditLogMaxObjectBytes {
+		// Rotate: determine next ConfigMap name and create it instead.
+		var nextIdx int
+		if cm.Name == auditLogConfigMapName {
+			nextIdx = 2
+		} else {
+			suffix := strings.TrimPrefix(cm.Name, auditLogConfigMapName+"-")
+			n, err := strconv.Atoi(suffix)
+			if err == nil {
+				nextIdx = n + 1
+			} else {
+				nextIdx = 2
+			}
+		}
+		var nextName string
+		if nextIdx == 1 {
+			nextName = auditLogConfigMapName
+		} else {
+			nextName = fmt.Sprintf("%s-%d", auditLogConfigMapName, nextIdx)
+		}
+		combined := strings.Join(lines, "")
+		newCM := corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nextName,
+				Namespace: auditLogConfigMapNamespace,
+			},
+			Data: map[string]string{
+				auditLogBaseKey: combined,
+			},
+		}
+		return k8sClient.Create(ctx, &newCM)
+	}
+
 	for _, line := range lines {
 		cm.Data[auditLogBaseKey] = cm.Data[auditLogBaseKey] + line
 	}

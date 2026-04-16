@@ -185,11 +185,29 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 		patched.Rules[i].Verbs = filtered
 	}
 	if !safeToFix {
+		// DEFENSE NOTE: When * is the only verb in a rule, we cannot safely remove it
+		// without inventing a replacement. Rather than silently returning nil (which
+		// produces no audit entry and no metric), we return a SKIPPED AuditEntry so the
+		// normal audit/metric pipeline is exercised and operators can see the decision.
+		// This also prevents the rate limit token from being consumed by a no-op — the
+		// caller only increments autoFixedCount when remAuditEntry != nil.
 		log.Info().
 			Str("violationType", "RBAC-001").
 			Str("resourceName", event.ResourceName).
-			Msg("wildcard-only verb rule — cannot safely remove without inventing verbs; skipping autofix")
-		return nil, nil
+			Msg("wildcard-only verb rule — cannot safely remove without inventing verbs; recording SKIPPED")
+		entry := AuditEntry{
+			EntryID:                remediationAuditEntryID("RBAC-001", event.ResourceName),
+			ViolationType:          "RBAC-001",
+			RiskLevel:              event.RiskLevel,
+			ResourceName:           event.ResourceName,
+			Namespace:              "",
+			Action:                 "SKIPPED",
+			Reason:                 "wildcard-only verb rule — no safe replacement without inventing verbs; manual review required",
+			PreRemediationSnapshot: event.ResourceSnapshot,
+			SuggestedAction:        "Manually replace the wildcard verb with an explicit least-privilege verb list.",
+			Timestamp:              time.Now().UTC(),
+		}
+		return &entry, nil
 	}
 
 	// DEFENSE NOTE: RBAC-001 is a surgical edit of an existing role, so Update is clearer than SSA

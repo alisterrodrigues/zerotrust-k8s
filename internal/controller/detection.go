@@ -106,7 +106,6 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Conte
 			if err != nil {
 				return nil, err
 			}
-			logViolation("RBAC-001", cr.Name, "", risk)
 			event, err := newViolationEvent(
 				"RBAC-001",
 				cr.Name,
@@ -125,7 +124,6 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardClusterRoles(ctx context.Conte
 			// Previously both RBAC-001 and RBAC-002 were gated on DenyWildcardVerbs, which meant
 			// RBAC-002 could not be disabled without also disabling RBAC-001. This CRD design fix
 			// makes each check independently toggleable.
-			logViolation("RBAC-002", cr.Name, "", "HIGH")
 			event, err := newViolationEvent(
 				"RBAC-002",
 				cr.Name,
@@ -179,7 +177,6 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Co
 		hasWildcardVerb, hasWildcardResource := namespacedRoleWildcardFlags(role)
 
 		if hasWildcardVerb && boolPtrVal(rbacSpec.DenyWildcardVerbs, false) {
-			logViolation("RBAC-004", role.Name, nsName, "HIGH")
 			event, err := newViolationEvent(
 				"RBAC-004",
 				role.Name,
@@ -194,7 +191,6 @@ func (r *ZeroTrustPolicyReconciler) detectWildcardNamespacedRoles(ctx context.Co
 			events = append(events, event)
 		}
 		if hasWildcardResource && boolPtrVal(rbacSpec.DenyWildcardResources, false) {
-			logViolation("RBAC-005", role.Name, nsName, "HIGH")
 			event, err := newViolationEvent(
 				"RBAC-005",
 				role.Name,
@@ -296,7 +292,6 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 			}
 			risk := rbac003Risk(sub)
 			// ClusterRoleBinding is cluster-scoped; namespace field on the binding is empty.
-			logViolation("RBAC-003", crb.Name, subjectNamespaceForLog(sub), risk)
 			event, err := newViolationEvent(
 				"RBAC-003",
 				crb.Name,
@@ -336,7 +331,6 @@ func (r *ZeroTrustPolicyReconciler) detectClusterAdminBindings(ctx context.Conte
 				continue
 			}
 			risk := rbac003Risk(sub)
-			logViolation("RBAC-003", rb.Name, rb.Namespace, risk)
 			event, err := newViolationEvent(
 				"RBAC-003",
 				rb.Name,
@@ -389,7 +383,6 @@ func (r *ZeroTrustPolicyReconciler) detectRequireNamespacedRoles(ctx context.Con
 			if strings.HasPrefix(sub.Name, "system:") {
 				continue
 			}
-			logViolation("RBAC-006", crb.Name, sub.Namespace, "LOW")
 			event, err := newViolationEvent(
 				"RBAC-006",
 				crb.Name,
@@ -503,7 +496,6 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 			if err != nil {
 				return nil, err
 			}
-			logViolation("NP-001", ns.Name, ns.Name, risk)
 			event, err := newViolationEvent(
 				"NP-001",
 				ns.Name,
@@ -552,7 +544,6 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutEgressPolicy(ctx cont
 		}
 		if !hasDefaultDenyEgress(npList.Items) {
 			risk := np002Risk(ns.Name)
-			logViolation("NP-002", ns.Name, ns.Name, risk)
 			event, err := newViolationEvent(
 				"NP-002",
 				ns.Name,

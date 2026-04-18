@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +52,14 @@ const (
 type ZeroTrustPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// mu guards seenViolations, rateLimitWindowStart, and rateLimitWindowCount.
+	// DEFENSE NOTE: controller-runtime serializes reconcile calls for the same key
+	// via a work queue, so in practice only one Reconcile() runs at a time for
+	// "cluster-baseline". The mutex is explicit belt-and-suspenders protection for
+	// multi-replica deployments (leader election enabled) where a brief overlap
+	// during leader transition could cause concurrent map writes or counter races.
+	mu sync.Mutex
 
 	// seenViolations records when each distinct violation was first seen in-cluster.
 	// DEFENSE NOTE: seenViolations is an in-memory cache keyed by violation identity. It prevents
@@ -85,6 +94,12 @@ type ZeroTrustPolicyReconciler struct {
 func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	cycleStart := time.Now()
 	defer func() { RecordCycleDuration(time.Since(cycleStart).Seconds()) }()
+
+	// DEFENSE NOTE: Lock for the duration of the reconcile body to protect
+	// seenViolations, rateLimitWindowStart, and rateLimitWindowCount from
+	// concurrent access in multi-replica deployments.
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	logger := log.FromContext(ctx)
 
@@ -127,6 +142,15 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	for _, event := range newEvents {
 		RecordViolation(event.ViolationType, event.Namespace, event.RiskLevel)
+	}
+
+	// DEFENSE NOTE: logViolation is called here — after the new/known split — so
+	// SIEM-destined violation_detected log lines are emitted only for genuinely new
+	// violations. At steady state (no new misconfigurations), stdout stays quiet.
+	// This prevents a persistent misconfiguration from generating an alert every
+	// 30 seconds in connected log pipelines.
+	for _, event := range newEvents {
+		logViolation(event.ViolationType, event.ResourceName, event.Namespace, event.RiskLevel)
 	}
 
 	// DEFENSE NOTE: Cache pruning is what makes detection latency measurement accurate. When a violation

@@ -86,6 +86,16 @@ spec:
           periodSeconds: 10
         # TODO(user): Configure the resources accordingly based on the project requirements.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # DEFENSE NOTE: The NAMESPACE env var is injected via the Kubernetes downward API so
+        # the controller can write the audit log ConfigMap to its own namespace at runtime,
+        # regardless of which namespace kustomize deploys it to. Without this, SetAuditNamespace()
+        # in cmd/main.go falls back to the hardcoded "zerotrust-system" default, which is correct
+        # for 'make run' but wrong for 'make deploy' (where the namespace comes from kustomization.yaml).
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         resources:
           limits:
             cpu: 500m

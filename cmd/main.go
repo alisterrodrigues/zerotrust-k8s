@@ -17,7 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 
@@ -208,6 +210,14 @@ func main() {
 
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		// DEFENSE NOTE: context.Canceled is returned when the manager receives SIGINT
+		// or SIGTERM and shuts down gracefully. This is the expected path for a clean
+		// Ctrl+C stop. Exiting 0 here prevents container orchestrators from treating
+		// a deliberate shutdown as a crash and restarting the pod unnecessarily.
+		if errors.Is(err, context.Canceled) {
+			setupLog.Info("Manager stopped gracefully")
+			os.Exit(0)
+		}
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

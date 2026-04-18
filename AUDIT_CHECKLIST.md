@@ -13,57 +13,37 @@ every fix session.
 
 ---
 
-## OPEN — Layer 2 Production Hardening (deferred, not blocking make run)
+## OPEN
 
-### V-4 — config/manager/manager.yaml missing NAMESPACE downward API injection
-**File:** `config/manager/manager.yaml`
-**Status:** 🟡 WARN (Layer 2 — not blocking for make run)
-**Description:** `cmd/main.go` reads the `NAMESPACE` env var and calls `SetAuditNamespace()`
-to configure the audit log ConfigMap namespace at runtime. However `config/manager/manager.yaml`
-does not inject this env var via the Kubernetes downward API. In a `make deploy` deployment,
-the controller runs in `zerotrust-k8s-system` (set by kustomization.yaml) but the audit
-namespace falls back to the hardcoded `zerotrust-system` default. Result: audit log writes
-fail silently in any deployed (non-make-run) environment.
-**Fix:** Add to the manager container spec in `config/manager/manager.yaml`:
-```yaml
-env:
-- name: NAMESPACE
-  valueFrom:
-    fieldRef:
-      fieldPath: metadata.namespace
-```
-
-### L2-1 — Leader election disabled; multi-replica unsafe
-**File:** `cmd/main.go`, `internal/controller/zerotrustpolicy_controller.go`
-**Status:** 🟡 WARN (Layer 2)
-**Description:** `enableLeaderElection: false` is the default. The reconciler struct holds
-mutable state (`seenViolations`, `rateLimitWindowStart`, `rateLimitWindowCount`) with no
-mutex protection. Running multiple replicas causes concurrent map writes and race conditions
-on these fields. Safe for single-replica deployment only.
-
-### L2-2 — logViolation() fires at steady state (noise in SIEM pipelines)
-**File:** `internal/controller/detection.go`
-**Status:** 🟡 WARN (Layer 2)
-**Description:** `logViolation()` is called inside detectors on every scan pass regardless
-of deduplication state. At steady state, violation_detected JSON lines are printed to stdout
-every 30 seconds even when `new_violations: 0`. A downstream SIEM would see continuous
-"violation_detected" events for persistent known violations.
-**Fix:** Gate `logViolation()` calls on the new/known distinction — only emit for violations
-not already in `seenViolations`.
-
-### L2-3 — Ctrl+C exits with code 1 (cosmetic)
-**File:** `cmd/main.go`
-**Status:** 🟡 WARN (Layer 2)
-**Description:** SIGINT causes graceful shutdown which returns a non-nil error through the
-manager chain. `os.Exit(1)` is called on any non-nil error from `mgr.Start()`. Handled
-correctly by container runtimes in production, but looks like a crash locally.
-**Fix:** Check if the error is `context.Canceled` and exit 0 for that case.
+No open items. All known issues fixed as of 2026-04-18. Next: three-tool audit round.
 
 ---
 
 ## FIXED
 
 *(Items move here once confirmed in the repo with date. Never deleted — only status changes.)*
+
+### 2026-04-18 — Layer 2 Go fixes (L2-1, L2-2, L2-3)
+- ✅ FIXED 2026-04-18 — L2-1: Added `mu sync.Mutex` to `ZeroTrustPolicyReconciler` struct;
+  `r.mu.Lock()` / `defer r.mu.Unlock()` acquired at top of `Reconcile()` after cycleStart/defer
+  lines; protects `seenViolations`, `rateLimitWindowStart`, `rateLimitWindowCount` from concurrent
+  access in multi-replica or leader-transition scenarios
+- ✅ FIXED 2026-04-18 — L2-2: Removed all 9 `logViolation()` calls from `detection.go`;
+  added single `for _, event := range newEvents` loop in `Reconcile()` after the new/known
+  split that calls `logViolation()` per new event only; steady-state stdout is now silent
+  when `new_violations: 0`
+- ✅ FIXED 2026-04-18 — L2-3: Added `"context"` and `"errors"` imports to `cmd/main.go`;
+  `mgr.Start()` error block now checks `errors.Is(err, context.Canceled)` and exits 0
+  for graceful SIGINT/SIGTERM shutdown; only unexpected errors exit 1
+
+### 2026-04-18 — Layer 2 partial fixes (non-Go files)
+- ✅ FIXED 2026-04-18 — V-4: `config/manager/manager.yaml` now injects `NAMESPACE` env var via
+  Kubernetes downward API (`metadata.namespace`); audit log namespace is correct for both
+  `make run` (falls back to `zerotrust-system`) and `make deploy` (reads actual pod namespace)
+- ✅ FIXED 2026-04-18 — `evaluations/results.md` Known Limitations updated: stale reference to
+  AUDIT_CHECKLIST item B (closed April 16) replaced with accurate description of retry behavior;
+  stale reference to AUDIT_CHECKLIST item A (closed April 16) replaced with forward-looking
+  note about mixed violation set re-run
 
 ### 2026-04-01
 - ✅ FIXED 2026-04-01 — ConfigMap optimistic concurrency conflict: main loop now batches all

@@ -29,10 +29,6 @@ jobs:
         run: make test
 
       - name: Test with race detector
-        # Re-run the controller tests with -race to catch data races.
-        # KUBEBUILDER_ASSETS is already cached from the previous step.
-        run: |
-          ASSETS="$(./bin/setup-envtest use --bin-dir ./bin -p path 2>/dev/null || \
-                   ./bin/setup-envtest* use --bin-dir ./bin -p path 2>/dev/null)"
-          KUBEBUILDER_ASSETS="$ASSETS" \
-            go test -race ./internal/controller/... -v -timeout 120s -count=1
+        # getFirstFoundEnvTestBinaryDir() in suite_test.go finds the envtest binaries
+        # already downloaded by make test into ./bin/k8s/ — no KUBEBUILDER_ASSETS needed.
+        run: go test -race ./internal/controller/... -v -timeout 120s -count=1

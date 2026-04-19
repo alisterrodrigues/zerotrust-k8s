@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -591,13 +592,7 @@ func hasDefaultDenyEgress(policies []netv1.NetworkPolicy) bool {
 		// must be absent (implicit full isolation). An empty policyTypes with no egress
 		// rules defaults to ingress-only isolation per Kubernetes docs, so we require
 		// explicit Egress here.
-		hasEgressType := false
-		for _, pt := range pol.Spec.PolicyTypes {
-			if pt == netv1.PolicyTypeEgress {
-				hasEgressType = true
-				break
-			}
-		}
+		hasEgressType := slices.Contains(pol.Spec.PolicyTypes, netv1.PolicyTypeEgress)
 		if !hasEgressType {
 			continue
 		}
@@ -644,12 +639,7 @@ func hasDefaultDenyIngress(policies []netv1.NetworkPolicy) bool {
 			// Implicit ingress isolation: omitted policyTypes + empty ingress rules = default-deny ingress.
 			hasIngressType = true
 		} else {
-			for _, pt := range pol.Spec.PolicyTypes {
-				if pt == netv1.PolicyTypeIngress {
-					hasIngressType = true
-					break
-				}
-			}
+			hasIngressType = slices.Contains(pol.Spec.PolicyTypes, netv1.PolicyTypeIngress)
 		}
 		if !hasIngressType {
 			continue
@@ -706,12 +696,7 @@ func boolPtrVal(b *bool, def bool) bool {
 }
 
 func stringSliceContains(slice []string, want string) bool {
-	for _, s := range slice {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, want)
 }
 
 func newViolationEvent(

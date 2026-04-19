@@ -151,7 +151,9 @@ func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.
 
 	// DEFENSE NOTE: Server-Side Apply is used instead of Create/Update because it is declarative
 	// and idempotent. Re-applying the same intent becomes a no-op rather than a duplicate-write error.
-	if err := r.Patch(ctx, defaultDeny, client.Apply, client.FieldOwner(ssaFieldManagerName)); err != nil {
+	// client.Apply is deprecated in newer controller-runtime versions in favour of r.Apply() but the
+	// functional behaviour is identical; suppressed until the project upgrades controller-runtime.
+	if err := r.Patch(ctx, defaultDeny, client.Apply, client.FieldOwner(ssaFieldManagerName)); err != nil { //nolint:staticcheck
 		return nil, err
 	}
 

@@ -94,8 +94,7 @@ func currentAuditConfigMapName(ctx context.Context, k8sClient client.Client) (st
 				highest = 1
 				highestSize = size
 			}
-		} else if strings.HasPrefix(cm.Name, auditLogConfigMapName+"-") {
-			suffix := strings.TrimPrefix(cm.Name, auditLogConfigMapName+"-")
+		} else if suffix, ok := strings.CutPrefix(cm.Name, auditLogConfigMapName+"-"); ok {
 			n, err := strconv.Atoi(suffix)
 			if err != nil {
 				continue

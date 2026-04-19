@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -303,10 +304,8 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 
 func clusterRoleHasWildcardVerbs(rules []rbacv1.PolicyRule) bool {
 	for _, rule := range rules {
-		for _, verb := range rule.Verbs {
-			if verb == rbacv1.VerbAll {
-				return true
-			}
+		if slices.Contains(rule.Verbs, rbacv1.VerbAll) {
+			return true
 		}
 	}
 	return false

@@ -20,9 +20,12 @@ spec:
     requireDefaultDenyEgress: false  # Set true to enable NP-002 detection
     exemptNamespaces:
       - kube-system
+      - kube-public        # system namespace for bootstrap ConfigMaps; no workloads
+      - kube-node-lease   # system namespace for node heartbeat leases; no workloads
       - monitoring
       - test-exempt
-      - zerotrust-system
+      - zerotrust-system  # controller's own namespace (make run path)
+      - zerotrust-k8s-system  # controller's own namespace (make deploy path)
   remediation:
     mode: auto
     rateLimit: 5   # Max auto-remediations per 30-second window

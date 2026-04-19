@@ -1,32 +1,16 @@
-name: E2E Tests
+# E2E tests are Kubebuilder-scaffolded boilerplate (//go:build e2e) with no
+# project-specific tests. They require a built Docker image and make deploy
+# against a live cluster, which is not part of this project's CI scope.
+# This workflow is intentionally disabled. Unit and integration tests run in
+# the main CI workflow (test.yml).
+name: E2E Tests (disabled)
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch: # Only runs when manually triggered — never on push/PR
 
 jobs:
-  test-e2e:
-    name: Run on Ubuntu
+  placeholder:
+    name: E2E tests disabled (see workflow comments)
     runs-on: ubuntu-latest
     steps:
-      - name: Clone the code
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-
-      - name: Verify kind installation
-        run: kind version
-
-      - name: Running Test e2e
-        run: |
-          go mod tidy
-          make test-e2e
+      - run: echo "E2E tests are out of scope for this project. See test.yml for CI."

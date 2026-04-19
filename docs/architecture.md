@@ -109,14 +109,24 @@ External:
 10. Risk classifier assigns LOW / HIGH / CRITICAL per decision matrix
 11. LOW risk + auto mode + rate limit available -> AutoRemediate() called
 12. HIGH/CRITICAL risk -> Escalation record written to audit log
-13. Mode overrides (dryrun/manual) and requireApprovalFor evaluated
-14. Rate limit (windowRateLimit, 30s window, AUTO_FIX only) caps remediation burst
-15. All new-event actions batched into single ConfigMap audit write
-16. seenViolations updated only after audit write succeeds (audit integrity guarantee)
-17. Prometheus metrics counters updated (violations, remediations, escalations,
+13. requireApprovalFor is evaluated first — if the violation type is listed, always
+    escalate regardless of risk or mode (checked before mode overrides to prevent
+    accidental circumvention by setting mode=auto)
+14. Mode overrides applied — manual forces ESCALATE for all; dryrun converts
+    AUTO_FIX to DRY_RUN_LOG
+15. TOCTOU revalidation — autofix functions re-check safety predicates immediately
+    before mutation: np001Risk() re-called before NP-001 patch; rbac001Risk()
+    re-called before RBAC-001 update; if risk has risen, ESCALATED entry returned
+    without applying the mutation
+16. Rate limit (windowCanRemediate / windowConsumeToken, 30s window, AUTO_FIX
+    confirmed writes only) caps remediation burst; token consumed only after
+    AUTO_REMEDIATED confirmed — SKIPPED and mid-cycle ESCALATED do not consume budget
+17. All new-event actions batched into single ConfigMap audit write
+18. seenViolations updated only after audit write succeeds (audit integrity guarantee)
+19. Prometheus metrics counters updated (violations, remediations, escalations,
     dryrun, skipped, cycle_duration)
-18. AuditComplete status condition written to ZeroTrustPolicy
-19. Loop requeues after 30s; event-driven watches trigger immediately
+20. AuditComplete status condition written to ZeroTrustPolicy
+21. Loop requeues after 30s; event-driven watches trigger immediately
 ```
 
 ---
@@ -226,7 +236,7 @@ All multi-namespace scans use a single cluster-wide r.List call (O(1) API calls)
 - **NP-001 LOW**: Creates ztk8s-default-deny-ingress NetworkPolicy via Server-Side Apply (idempotent)
 - **RBAC-001 LOW**: Removes wildcard verbs from ClusterRole via Update; skips if * is the sole verb in any rule
 
-**Rate limiting:** windowRateLimit(limit int) bool tracks remediations within a 30-second time window. The check is applied inside case DecisionActionAutoFix: only — ESCALATE, SKIP, and DRY_RUN decisions do not consume the rate limit budget. This ensures HIGH-risk escalations cannot starve LOW-risk auto-fixes of their budget.
+**Rate limiting:** `windowCanRemediate(limit int) bool` checks budget availability without consuming a token; `windowConsumeToken()` records one remediation and is called **only after** `applyRemediation` returns `Action == "AUTO_REMEDIATED"`. SKIPPED outcomes (wildcard-only verb, no safe replacement) and ESCALATED outcomes from mid-cycle TOCTOU revalidation do not consume budget. The check is applied inside `case DecisionActionAutoFix:` only.
 
 **Audit batch write:** All audit entries for a cycle are collected in pendingAuditEntries and written in a single AppendAuditEntries call. seenViolations is updated only after this write succeeds.
 
@@ -243,7 +253,7 @@ All multi-namespace scans use a single cluster-wide r.List call (O(1) API calls)
 
 **Status conditions:** After every successful reconcile cycle, an AuditComplete condition is written to the ZeroTrustPolicy status subresource. Visible via kubectl describe zerotrustpolicy cluster-baseline.
 
-**Prometheus metrics** exposed at :8080/metrics (plain HTTP, not HTTPS):
+**Prometheus metrics** exposed at `:8080/metrics` during `make run` (plain HTTP). When deployed via `make deploy`, the kustomization patches the bind address to `:8443` — enable `--metrics-secure=true` in production to serve HTTPS with authentication:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

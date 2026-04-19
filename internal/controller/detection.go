@@ -394,8 +394,14 @@ func (r *ZeroTrustPolicyReconciler) detectRequireNamespacedRoles(ctx context.Con
 			if err != nil {
 				return nil, err
 			}
+			// DEFENSE NOTE: Populate SubjectName/SubjectKind for per-subject deduplication,
+			// consistent with RBAC-003. A ClusterRoleBinding with N non-system subjects
+			// produces N distinct ViolationKeys so each subject gets an independent
+			// deduplication key and audit trail entry.
+			event.SubjectName = sub.Name
+			event.SubjectKind = sub.Kind
 			events = append(events, event)
-			break // one violation per binding — subject already identifies the concern
+			// Removed: break — emit one event per qualifying subject, not one per binding.
 		}
 	}
 	return events, nil
@@ -472,6 +478,21 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		return nil, err
 	}
 
+	// DEFENSE NOTE: Single cluster-wide NetworkPolicyList instead of one List per
+	// namespace. controller-runtime's informer cache serves this from memory (no
+	// network round-trip). Consistent with the RBAC scalability refactor — O(1) API
+	// calls regardless of namespace count, followed by an in-memory map lookup per
+	// namespace in the loop below.
+	var allNPList netv1.NetworkPolicyList
+	if err := r.List(ctx, &allNPList); err != nil {
+		return nil, err
+	}
+	npByNamespace := make(map[string][]netv1.NetworkPolicy, len(nsList.Items))
+	for i := range allNPList.Items {
+		np := &allNPList.Items[i]
+		npByNamespace[np.Namespace] = append(npByNamespace[np.Namespace], *np)
+	}
+
 	events := make([]ViolationEvent, 0)
 	for i := range nsList.Items {
 		ns := &nsList.Items[i]
@@ -481,17 +502,7 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutNetworkPolicy(ctx con
 		if _, skip := exempt[ns.Name]; skip {
 			continue
 		}
-
-		var npList netv1.NetworkPolicyList
-		if err := r.List(ctx, &npList, client.InNamespace(ns.Name)); err != nil {
-			return nil, err
-		}
-		// DEFENSE NOTE: Checking for the presence of ANY NetworkPolicy was a logic gap — a
-		// wide-open allow-all policy technically satisfies "has a NetworkPolicy" but provides
-		// zero Zero Trust protection. The correct check verifies that a default-deny ingress
-		// policy specifically exists: empty podSelector (selects all pods), Ingress in
-		// policyTypes, and empty ingress rules (blocks all ingress traffic).
-		if !hasDefaultDenyIngress(npList.Items) {
+		if !hasDefaultDenyIngress(npByNamespace[ns.Name]) {
 			risk, err := r.np001Risk(ctx, ns.Name)
 			if err != nil {
 				return nil, err
@@ -528,6 +539,18 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutEgressPolicy(ctx cont
 		return nil, err
 	}
 
+	// DEFENSE NOTE: Same O(1) cluster-wide List pattern as detectNamespacesWithoutNetworkPolicy.
+	// Avoids per-namespace List calls inside the loop.
+	var allNPList netv1.NetworkPolicyList
+	if err := r.List(ctx, &allNPList); err != nil {
+		return nil, err
+	}
+	npByNamespace := make(map[string][]netv1.NetworkPolicy, len(nsList.Items))
+	for i := range allNPList.Items {
+		np := &allNPList.Items[i]
+		npByNamespace[np.Namespace] = append(npByNamespace[np.Namespace], *np)
+	}
+
 	events := make([]ViolationEvent, 0)
 	for i := range nsList.Items {
 		ns := &nsList.Items[i]
@@ -537,12 +560,7 @@ func (r *ZeroTrustPolicyReconciler) detectNamespacesWithoutEgressPolicy(ctx cont
 		if _, skip := exempt[ns.Name]; skip {
 			continue
 		}
-
-		var npList netv1.NetworkPolicyList
-		if err := r.List(ctx, &npList, client.InNamespace(ns.Name)); err != nil {
-			return nil, err
-		}
-		if !hasDefaultDenyEgress(npList.Items) {
+		if !hasDefaultDenyEgress(npByNamespace[ns.Name]) {
 			risk := np002Risk(ns.Name)
 			event, err := newViolationEvent(
 				"NP-002",

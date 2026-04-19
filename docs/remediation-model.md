@@ -76,8 +76,8 @@
 
 The following actions may be executed automatically when risk level is LOW and remediation mode is `auto`:
 
-- **NP-001 LOW**: Apply a `ztk8s-default-deny-ingress` NetworkPolicy to an unprotected empty namespace. Uses Server-Side Apply — idempotent, safe to repeat.
-- **RBAC-001 LOW**: Remove wildcard verbs from a non-system ClusterRole that has no active bindings. Uses `Update`. If `*` is the sole verb in a rule (no safe replacement without inventing verbs), the autofix produces a `SKIPPED` audit entry with `ztk8s_skipped_total` incremented — the violation is recorded for human review rather than silently dropped.
+- **NP-001 LOW**: Apply a `ztk8s-default-deny-ingress` NetworkPolicy to an unprotected empty namespace. Uses Server-Side Apply — idempotent, safe to repeat. Before applying the policy, `np001Risk()` is re-called immediately inside the autofix function to revalidate that no pods have started since detection (TOCTOU guard). If risk has risen to HIGH, the autofix returns an ESCALATED audit entry without patching.
+- **RBAC-001 LOW**: Remove wildcard verbs from a non-system ClusterRole that has no active bindings. Uses `Update`. Before updating the role, `rbac001Risk()` is re-called inside the autofix function to revalidate that no bindings were created since detection (TOCTOU guard). If risk has risen to HIGH, the autofix returns an ESCALATED audit entry without updating. If `*` is the sole verb in a rule (no safe replacement without inventing verbs), the autofix produces a `SKIPPED` audit entry with `ztk8s_skipped_total` incremented — the violation is recorded for human review rather than silently dropped.
 
 The following actions are **never** auto-executed regardless of risk or mode:
 
@@ -108,7 +108,9 @@ The `spec.remediation.mode` field overrides the matrix action:
 
 The window is shared across all reconcile cycles that fire within a 30-second period, including event-driven watch triggers. Violations that exceed the budget in the current window are escalated rather than auto-fixed. The counter resets automatically when a new 30-second window begins.
 
-This is enforced by the `windowRateLimit()` method on the reconciler, called inside `case DecisionActionAutoFix:` in `internal/controller/zerotrustpolicy_controller.go`.
+Rate limit enforcement uses two methods on the reconciler in `internal/controller/zerotrustpolicy_controller.go`:
+- `windowCanRemediate(limit int) bool` — checks whether the budget allows another remediation without consuming a token.
+- `windowConsumeToken()` — records one remediation against the budget. Called **only after** `applyRemediation` returns an `AUTO_REMEDIATED` entry. SKIPPED outcomes (wildcard-only verb rule with no safe replacement) and mid-cycle ESCALATED outcomes (risk elevated between detection and mutation via TOCTOU revalidation) do not consume a token.
 
 ---
 
@@ -141,15 +143,15 @@ All EntryID values use nanosecond-precision timestamps to prevent duplicates und
 
 **Dry-run mode** (`remediation.mode: dryrun`): All AUTO_FIX decisions become DRY_RUN_LOG — the intended action is recorded in the audit log with no API writes. The `ztk8s_dryrun_total` Prometheus counter increments, giving operators a signal that the detection pipeline is active.
 
-**Rate limiting** (`remediation.rateLimit: 5`): Maximum N auto-remediations per 30-second time window. Applied to AUTO_FIX decisions only. Enforced by a time-window counter, not a per-cycle counter, so event-driven watch bursts are correctly throttled.
+**Rate limiting** (`remediation.rateLimit: 5`): Maximum N auto-remediations per 30-second time window. Applied to AUTO_FIX decisions only. The budget token is consumed only after `applyRemediation` returns an `AUTO_REMEDIATED` entry — SKIPPED outcomes and mid-cycle ESCALATED outcomes (from TOCTOU revalidation) do not reduce the budget. Enforced by a split check/consume design (`windowCanRemediate` + `windowConsumeToken`), so event-driven watch bursts are correctly throttled without over-counting no-op outcomes.
 
-**Approval gates** (`remediation.requireApprovalFor`): Named violation types that always escalate regardless of risk level or mode. Evaluated before mode overrides.
+**Approval gates** (`remediation.requireApprovalFor`): Named violation types that always escalate regardless of risk level or mode. Evaluated before mode overrides. Accepts both canonical violation type codes (e.g. `RBAC-003`) and human-readable aliases (case-insensitive): `ClusterAdminBinding` → RBAC-003, `WildcardVerbs` → RBAC-001, `WildcardResources` → RBAC-002, `MissingNetworkPolicy` → NP-001.
 
 **kube-system guard**: A secondary defense-in-depth check in `applyRemediation` prevents any write to `kube-system` even if the decision matrix is bypassed by a future code path.
 
 **Pre-remediation snapshot**: Full JSON of the target resource written to the audit ConfigMap before any mutation. Serves as a rollback record for human recovery.
 
-**Exemption list** (`networkPolicy.exemptNamespaces`): Named namespaces never flagged by NP-001 or NP-002 detectors. The controller's own namespace (`zerotrust-system`) should always be included to prevent self-remediation.
+**Exemption list** (`networkPolicy.exemptNamespaces`): Named namespaces never flagged by NP-001 or NP-002 detectors. Should always include the controller's own namespace and standard Kubernetes system namespaces (`kube-system`, `kube-public`, `kube-node-lease`). The sample CR includes both `zerotrust-system` (the `make run` namespace) and `zerotrust-k8s-system` (the `make deploy` namespace set by kustomization.yaml).
 
 **Idempotent autofixes**: NP-001 uses Server-Side Apply (re-apply is a no-op). RBAC-001 re-checks the role state before patching and returns a no-op if already clean.
 

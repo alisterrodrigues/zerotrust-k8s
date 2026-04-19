@@ -98,6 +98,37 @@ func (r *ZeroTrustPolicyReconciler) applyDefaultDenyIngressForNP001(ctx context.
 		return nil, err
 	}
 
+	// DEFENSE NOTE: Re-validate risk level immediately before mutation. The time
+	// between detection and remediation spans multiple API calls. If a pod started
+	// in this namespace during that window, np001Risk() now returns HIGH and
+	// applying a default-deny policy without operator review would break new inbound
+	// connections to a live workload. Re-checking here closes the TOCTOU window.
+	currentRisk, riskErr := r.np001Risk(ctx, event.Namespace)
+	if riskErr != nil {
+		return nil, riskErr
+	}
+	if currentRisk != "LOW" {
+		log.Info().
+			Str("violationType", "NP-001").
+			Str("namespace", event.Namespace).
+			Str("detectedRisk", event.RiskLevel).
+			Str("currentRisk", currentRisk).
+			Msg("risk elevated between detection and remediation; aborting auto-fix")
+		abortEntry := AuditEntry{
+			EntryID:                remediationAuditEntryID("NP-001", event.Namespace),
+			ViolationType:          "NP-001",
+			RiskLevel:              currentRisk,
+			ResourceName:           event.Namespace,
+			Namespace:              event.Namespace,
+			Action:                 "ESCALATED",
+			Reason:                 fmt.Sprintf("risk elevated from LOW to %s after detection; a pod was created mid-cycle — auto-fix aborted to prevent disrupting live workloads", currentRisk),
+			PreRemediationSnapshot: event.ResourceSnapshot,
+			SuggestedAction:        "Apply a default-deny ingress NetworkPolicy manually with appropriate allow-rules for running workloads.",
+			Timestamp:              time.Now().UTC(),
+		}
+		return &abortEntry, nil
+	}
+
 	defaultDeny := &netv1.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "networking.k8s.io/v1",
@@ -169,6 +200,37 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 		return nil, nil
 	}
 
+	// DEFENSE NOTE: Re-validate binding state immediately before mutation. A
+	// ClusterRoleBinding or RoleBinding may have been created after detection,
+	// changing the risk from LOW (no bindings) to HIGH (active bindings).
+	// Modifying a bound role would affect active subjects — always require human
+	// review in that case rather than auto-patching.
+	currentRisk, riskErr := r.rbac001Risk(ctx, event.ResourceName)
+	if riskErr != nil {
+		return nil, riskErr
+	}
+	if currentRisk != "LOW" {
+		log.Info().
+			Str("violationType", "RBAC-001").
+			Str("resourceName", event.ResourceName).
+			Str("detectedRisk", event.RiskLevel).
+			Str("currentRisk", currentRisk).
+			Msg("risk elevated between detection and remediation; aborting auto-fix")
+		abortEntry := AuditEntry{
+			EntryID:                remediationAuditEntryID("RBAC-001", event.ResourceName),
+			ViolationType:          "RBAC-001",
+			RiskLevel:              currentRisk,
+			ResourceName:           event.ResourceName,
+			Namespace:              "",
+			Action:                 "ESCALATED",
+			Reason:                 fmt.Sprintf("risk elevated from LOW to %s after detection; active bindings exist — auto-fix aborted to prevent authorization failures", currentRisk),
+			PreRemediationSnapshot: event.ResourceSnapshot,
+			SuggestedAction:        "A binding was created after detection. Review impacted subjects and patch role verbs manually.",
+			Timestamp:              time.Now().UTC(),
+		}
+		return &abortEntry, nil
+	}
+
 	patched := role.DeepCopy()
 	safeToFix := true
 	for i := range patched.Rules {
@@ -231,7 +293,7 @@ func (r *ZeroTrustPolicyReconciler) removeWildcardVerbsForRBAC001Low(ctx context
 		Action:                 "AUTO_REMEDIATED",
 		Reason:                 "Removed wildcard verbs from ClusterRole",
 		PreRemediationSnapshot: event.ResourceSnapshot,
-		SuggestedAction:        "Review replaced verbs — default is get;list;watch",
+		SuggestedAction:        "Wildcard verbs removed. If any rule is now empty, add explicit least-privilege verbs (e.g. get, list, watch) appropriate for this role's purpose.",
 		Timestamp:              time.Now().UTC(),
 	}
 	return &entry, nil

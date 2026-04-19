@@ -68,9 +68,9 @@ Boundary 4: Controller namespace → All other namespaces
 | No node-level protection | Does not detect or respond to node compromise, kubelet misconfigurations, or host namespace escapes |
 | No pod security standards | Does not enforce privileged container restrictions, hostPID, hostNetwork, or seccomp profiles |
 | No mTLS enforcement | Service-to-service encryption and mutual authentication are explicitly out of scope |
-| Periodic detection gap | Violations that appear and disappear within one reconcile interval may be missed. Event-driven watches mitigate this for ClusterRole, ClusterRoleBinding, RoleBinding, NetworkPolicy, and Namespace changes |
+| Periodic detection gap | Violations that appear and disappear within one reconcile interval may be missed. Event-driven watches mitigate this for ClusterRole, ClusterRoleBinding, RoleBinding, Role, NetworkPolicy, Namespace, and Pod changes |
 | In-memory deduplication | The `seenViolations` cache is lost on controller restart. All active violations are re-detected as new in the first cycle post-restart |
-| No self-monitoring | The controller does not audit its own namespace or service account for misconfiguration |
+| Partial self-monitoring | The controller's own namespace (`zerotrust-system` / `zerotrust-k8s-system`) is exempt from NP-001/NP-002 auto-remediation via `exemptNamespaces`. However the controller's own ClusterRole and ClusterRoleBinding objects ARE scanned by RBAC detectors (RBAC-001 through RBAC-006). In particular, RBAC-006 will flag the controller's own ClusterRoleBinding on every restart as a candidate for namespace-scoping. This is expected noise and does not affect safety since RBAC-006 is escalation-only. Built-in Kubernetes roles (e.g. `cluster-admin`) will also generate RBAC-001 HIGH escalations on every restart since `seenViolations` is in-memory only |
 | No runtime threat detection | Does not monitor syscalls, network flows, or process activity inside pods |
 | No supply chain security | Does not validate container images, signing, or admission from untrusted registries |
 | NP-002 detection-only | Default-deny egress detection is implemented but no autofix exists; safe egress rules are workload-dependent and require human authorship |

@@ -33,7 +33,6 @@ import (
 const (
 	auditLogConfigMapName  = "ztk8s-audit-log"
 	auditLogBaseKey        = "audit.log"
-	auditLogMaxDataBytes   = 900 * 1024
 	auditLogMaxObjectBytes = 850 * 1024
 	defaultAuditNamespace  = "zerotrust-system"
 )
@@ -126,51 +125,6 @@ func currentAuditConfigMapName(ctx context.Context, k8sClient client.Client) (st
 		return auditLogConfigMapName, nil
 	}
 	return fmt.Sprintf("%s-%d", auditLogConfigMapName, highest), nil
-}
-
-// AppendAuditEntry appends one JSON line into the active audit ConfigMap without overwriting existing lines.
-func AppendAuditEntry(ctx context.Context, k8sClient client.Client, entry AuditEntry) error {
-	encoded, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	line := string(encoded) + "\n"
-
-	targetName, err := currentAuditConfigMapName(ctx, k8sClient)
-	if err != nil {
-		// Fall back to base name on list error — better to attempt write than lose entry.
-		targetName = auditLogConfigMapName
-	}
-	key := client.ObjectKey{
-		Name:      targetName,
-		Namespace: auditLogConfigMapNamespace,
-	}
-
-	var cm corev1.ConfigMap
-	if err := k8sClient.Get(ctx, key, &cm); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-		// DEFENSE NOTE: Creating the ConfigMap lazily keeps bootstrap simple: no separate install step is
-		// required before first remediation cycle writes an audit record.
-		cm = corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      targetName,
-				Namespace: auditLogConfigMapNamespace,
-			},
-			Data: map[string]string{
-				auditLogBaseKey: line,
-			},
-		}
-		return k8sClient.Create(ctx, &cm)
-	}
-
-	if cm.Data == nil {
-		cm.Data = map[string]string{}
-	}
-
-	cm.Data[auditLogBaseKey] = cm.Data[auditLogBaseKey] + line
-	return k8sClient.Update(ctx, &cm)
 }
 
 // AppendAuditEntries writes all entries in a single ConfigMap Update,

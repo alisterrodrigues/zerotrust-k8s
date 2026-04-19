@@ -178,11 +178,10 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 		switch decision.Action {
 		case DecisionActionAutoFix:
-			// DEFENSE NOTE: windowRateLimit is checked here — inside the AUTO_FIX branch only —
-			// so that only actual remediation writes consume the 30-second budget. ESCALATE,
-			// SKIP, and DRY_RUN decisions do not count against the rate limit. This ensures
-			// HIGH-risk escalations cannot starve LOW-risk auto-fixes of their budget.
-			if !r.windowRateLimit(rateLimit) {
+			// DEFENSE NOTE: windowCanRemediate is checked here — inside AUTO_FIX only —
+			// so that only actual remediation writes are gated by the 30-second budget.
+			// ESCALATE, SKIP, and DRY_RUN decisions never reach this branch.
+			if !r.windowCanRemediate(rateLimit) {
 				pendingAuditEntries = append(pendingAuditEntries, AuditEntry{
 					EntryID:                buildAuditEntryID(event),
 					ViolationType:          event.ViolationType,
@@ -198,21 +197,26 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				escalatedCount++
 				break
 			}
-			// DEFENSE NOTE: By returning the AuditEntry from the autofix functions instead of
-			// writing it inline, all audit writes for a cycle flow through the single
-			// AppendAuditEntries batch call below. This guarantees at most one ConfigMap write
-			// per reconcile cycle regardless of how many violations were found or remediated.
 			remAuditEntry, err := r.applyRemediation(ctx, event)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			if remAuditEntry != nil {
 				pendingAuditEntries = append(pendingAuditEntries, *remAuditEntry)
-				// DEFENSE NOTE: autoFixedCount is only incremented when applyRemediation confirms
-				// an actual API write occurred (non-nil entry). No-op returns (nil, nil) — e.g.
-				// namespace already gone, role already clean — do not consume rate limit budget
-				// or inflate remediation metrics.
-				autoFixedCount++
+				// DEFENSE NOTE: Switch on the actual outcome reported by applyRemediation.
+				// Token is consumed and autoFixedCount incremented ONLY for AUTO_REMEDIATED
+				// — confirmed successful cluster mutations. SKIPPED (wildcard-only verb rule,
+				// no safe replacement) and ESCALATED (risk elevated mid-cycle via TOCTOU
+				// revalidation) do not consume budget or inflate the remediation counter.
+				switch remAuditEntry.Action {
+				case "AUTO_REMEDIATED":
+					r.windowConsumeToken()
+					autoFixedCount++
+				case "SKIPPED":
+					skippedCount++
+				case "ESCALATED":
+					escalatedCount++
+				}
 			}
 		case DecisionActionEscalate:
 			escalatedCount++
@@ -359,24 +363,32 @@ func (r *ZeroTrustPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: auditRequeueInterval}, nil
 }
 
-// windowRateLimit returns true if a remediation may proceed given the configured
-// rate limit per 30-second window. It resets the window when 30 seconds have elapsed.
+// windowCanRemediate returns true if the current 30-second window budget allows
+// another remediation. Does NOT consume a token — call windowConsumeToken() only
+// after a confirmed AUTO_REMEDIATED write.
 //
-// DEFENSE NOTE: The window duration matches auditRequeueInterval (30s) so the rate
-// limit budget is semantically "N remediations per audit cycle" even when watches
-// fire multiple reconcile calls within that cycle.
-func (r *ZeroTrustPolicyReconciler) windowRateLimit(limit int) bool {
+// DEFENSE NOTE: Separating "check" from "consume" ensures that only actual cluster
+// mutations count against the rate limit. No-op returns (namespace gone, role already
+// clean), SKIPPED decisions (wildcard-only verb), and ESCALATED outcomes from mid-cycle
+// TOCTOU revalidation do not consume budget. This keeps the rate limit semantically
+// correct: "N actual remediations per 30-second window."
+func (r *ZeroTrustPolicyReconciler) windowCanRemediate(limit int) bool {
 	now := time.Now()
 	if now.Sub(r.rateLimitWindowStart) >= auditRequeueInterval {
 		// Window expired — reset counter and start a new window.
 		r.rateLimitWindowStart = now
 		r.rateLimitWindowCount = 0
 	}
-	if r.rateLimitWindowCount >= limit {
-		return false
-	}
+	return r.rateLimitWindowCount < limit
+}
+
+// windowConsumeToken records one remediation against the current window budget.
+// Must only be called after applyRemediation returns Action == "AUTO_REMEDIATED".
+//
+// DEFENSE NOTE: Token consumed only after confirmed successful write, never for
+// SKIPPED, ESCALATED, or nil (no-op) outcomes from applyRemediation.
+func (r *ZeroTrustPolicyReconciler) windowConsumeToken() {
 	r.rateLimitWindowCount++
-	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.

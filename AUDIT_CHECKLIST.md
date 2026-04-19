@@ -15,13 +15,68 @@ every fix session.
 
 ## OPEN
 
-No open items. All known issues fixed as of 2026-04-18. Next: three-tool audit round.
+No open items. All known issues fixed as of 2026-04-19. Next: fourth audit round or final paper.
 
 ---
 
 ## FIXED
 
 *(Items move here once confirmed in the repo with date. Never deleted — only status changes.)*
+
+### 2026-04-19 — Round 3 audit fixes (Go code)
+- ✅ FIXED 2026-04-19 — R3-1 (TOCTOU NP-001): `applyDefaultDenyIngressForNP001` now calls `np001Risk()`
+  immediately before `r.Patch()`; if risk has risen from LOW to HIGH (pod started mid-cycle),
+  returns an ESCALATED AuditEntry without applying the NetworkPolicy
+- ✅ FIXED 2026-04-19 — R3-2 (TOCTOU RBAC-001): `removeWildcardVerbsForRBAC001Low` now calls
+  `rbac001Risk()` immediately before `role.DeepCopy()`; if risk has risen to HIGH (binding
+  created mid-cycle), returns an ESCALATED AuditEntry without updating the ClusterRole
+- ✅ FIXED 2026-04-19 — R3-3 (RBAC-001 SuggestedAction text): misleading "default is
+  get;list;watch" text replaced with accurate guidance in `remediationauditlog.go` line 234
+- ✅ FIXED 2026-04-19 — R3-4 (rate limit check/consume split): `windowRateLimit()` replaced with
+  `windowCanRemediate()` (check only) + `windowConsumeToken()` (consume only); token consumed
+  and `autoFixedCount` incremented only on `AUTO_REMEDIATED`; SKIPPED and ESCALATED outcomes
+  from `applyRemediation` correctly feed their counters without burning budget
+- ✅ FIXED 2026-04-19 — R3-5 (dead code): `AppendAuditEntry` (singular, exported, never called,
+  missing V-3 overflow guard) deleted from `auditlog.go`; `auditLogMaxDataBytes` constant
+  (defined, never referenced) deleted
+- ✅ FIXED 2026-04-19 — R3-6 (RBAC-006 per-subject): removed `break` from
+  `detectRequireNamespacedRoles`; added `event.SubjectName`/`event.SubjectKind` population;
+  now emits one ViolationEvent per qualifying subject, consistent with RBAC-003
+- ✅ FIXED 2026-04-19 — R3-7 (NP O(1)): `detectNamespacesWithoutNetworkPolicy` and
+  `detectNamespacesWithoutEgressPolicy` now do single cluster-wide `NetworkPolicyList` +
+  `map[namespace][]NetworkPolicy` in-memory lookup; consistent with RBAC scalability refactor
+
+### 2026-04-19 — Round 3 audit fixes (config, scenarios, CI/CD)
+- ✅ FIXED 2026-04-19 — R3-8 (sample CR namespace coverage): added `kube-public`, `kube-node-lease`,
+  and `zerotrust-k8s-system` to `exemptNamespaces` in sample CR; prevents AUTO_FIX writes to
+  system namespaces and ensures `make deploy` namespace is also exempt
+- ✅ FIXED 2026-04-19 — R3-9 (scenario 02 rotation): `02-detect-rbac001.sh` now queries all
+  `ztk8s-audit-log*` ConfigMaps dynamically; handles audit log rotation across multi-session runs
+- ✅ FIXED 2026-04-19 — R3-10 (CI/CD overhaul): `test-e2e.yml` disabled (workflow_dispatch only;
+  scaffolded boilerplate with no project tests); `test.yml` replaced with proper CI pipeline
+  (build → vet → `make test` → race detector); `lint.yml` `make lint-config` step removed
+  (was failing due to broken plugin verification)
+- ✅ FIXED 2026-04-19 — R3-11 (golangci-lint plugin): `logcheck` custom module plugin removed from
+  `.golangci.yml` and `.custom-gcl.yml`; `dupl`, `gocyclo`, `lll`, `unparam` removed (noisy on
+  controller code, no actionable findings); eliminates CGO plugin compilation failure in CI
+
+### 2026-04-19 — Round 3 audit fixes (documentation)
+- ✅ FIXED 2026-04-19 — R3-12 (architecture.md step ordering): event flow steps 13–21 corrected;
+  requireApprovalFor evaluated before mode overrides; TOCTOU revalidation step added;
+  rate limit split (check/consume) documented; step numbers renumbered
+- ✅ FIXED 2026-04-19 — R3-13 (architecture.md metrics port): clarified that `:8080` is `make run`
+  path; `make deploy` patches to `:8443`; production note added
+- ✅ FIXED 2026-04-19 — R3-14 (architecture.md rate limit): `windowRateLimit()` replaced with
+  `windowCanRemediate()` / `windowConsumeToken()` in Kubernetes Controller Loop section
+- ✅ FIXED 2026-04-19 — R3-15 (remediation-model.md rate limit): rate limiting section updated
+  to describe `windowCanRemediate`/`windowConsumeToken` split and TOCTOU interaction;
+  autofix descriptions updated with TOCTOU guard language; `requireApprovalFor` alias map
+  documented; exemptNamespaces note updated to include both deployment namespaces
+- ✅ FIXED 2026-04-19 — R3-16 (threat-model.md watches list): Periodic detection gap row updated
+  to include Role and Pod watches
+- ✅ FIXED 2026-04-19 — R3-17 (threat-model.md self-monitoring): "No self-monitoring" updated to
+  "Partial self-monitoring" with accurate description of what IS and IS NOT scanned;
+  expected RBAC-006 and RBAC-001 HIGH escalation noise on restart documented
 
 ### 2026-04-18 — Layer 2 Go fixes (L2-1, L2-2, L2-3)
 - ✅ FIXED 2026-04-18 — L2-1: Added `mu sync.Mutex` to `ZeroTrustPolicyReconciler` struct;

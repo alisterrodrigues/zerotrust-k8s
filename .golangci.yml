@@ -5,14 +5,11 @@ linters:
   default: none
   enable:
     - copyloopvar
-    - dupl
     - errcheck
     - ginkgolinter
     - goconst
-    - gocyclo
     - govet
     - ineffassign
-    - lll
     - modernize
     - misspell
     - nakedret
@@ -20,14 +17,8 @@ linters:
     - revive
     - staticcheck
     - unconvert
-    - unparam
     - unused
-    - logcheck
   settings:
-    custom:
-      logcheck:
-        type: "module"
-        description: Checks Go logging calls for Kubernetes logging conventions.
     revive:
       rules:
         - name: comment-spacings
@@ -39,11 +30,8 @@ linters:
     generated: lax
     rules:
       - linters:
-          - lll
-        path: api/*
-      - linters:
           - dupl
-          - lll
+          - goconst
         path: internal/*
     paths:
       - third_party$

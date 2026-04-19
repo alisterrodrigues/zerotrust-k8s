@@ -13,16 +13,29 @@ kubectl create clusterrole "$ROLE" \
 echo "T1_ROLE=$ROLE T1_EPOCH_NS=$T1"
 echo "==> Waiting for audit log entry (up to 90s covers 3 full reconcile cycles)..."
 for i in $(seq 1 90); do
-  # Search all audit log keys (audit.log, audit.log.2, etc.) in case of rollover.
-  ENTRY=$(kubectl get configmap ztk8s-audit-log \
-    -n zerotrust-system -o json 2>/dev/null \
+  # Search ALL audit log ConfigMaps (base + any rotation objects ztk8s-audit-log-2, -3, etc.)
+  # so the scenario works correctly even after audit log rotation across multiple sessions.
+  ENTRY=$(kubectl get configmap -n zerotrust-system -o json \
+    $(kubectl get configmap -n zerotrust-system -o name 2>/dev/null \
+      | grep 'ztk8s-audit-log' \
+      | awk -F/ '{print $2}' \
+      | tr '\n' ' ') 2>/dev/null \
     | python3 -c "
 import sys, json
-d = json.load(sys.stdin).get('data', {})
-for v in d.values():
-    for line in v.splitlines():
-        if '$ROLE' in line:
-            print(line)
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+# Handle both single ConfigMap and list responses
+if data.get('kind') == 'List':
+    items = data.get('items', [])
+else:
+    items = [data]
+for item in items:
+    for v in item.get('data', {}).values():
+        for line in v.splitlines():
+            if '$ROLE' in line:
+                print(line)
 " 2>/dev/null | tail -1)
   if [ -n "$ENTRY" ]; then
     T2=$(date +%s%N)
